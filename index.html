@@ -23,23 +23,20 @@ const firebaseConfig = {
 const app = initializeApp(firebaseConfig);
 const db  = getDatabase(app);
 
-/* ─── dynamic board config (set when room created/joined) ─── */
 let BSIZE    = 15;
 let PADDING  = 30;
 const CSIZE  = 540;
 let STEP     = (CSIZE - PADDING*2) / (BSIZE-1);
 const COLS   = 'ABCDEFGHJKLMNOPQRST';
 
-/* ─── room settings ─── */
 let roomSettings = {
   boardSize:   15,
-  winCount:    3,      // best-of
-  timeLimit:   0,      // 0=無限制, else seconds per move
+  winCount:    3,
+  timeLimit:   0,
   forbiddenBlack: false,
   firstPlayer: 'black'
 };
 
-/* ─── state ─── */
 let myColor   = null;
 let roomId    = null;
 let nickname  = '';
@@ -56,27 +53,21 @@ let timeLeft  = 0;
 const canvas = document.getElementById('board');
 const ctx    = canvas.getContext('2d');
 
-/* ══════════════════════════════════════
-   LOBBY
-══════════════════════════════════════ */
 window.createRoom = async function() {
   const nick = document.getElementById('nick-input').value.trim();
   if (!nick) { lobbyMsg('請輸入暱稱', true); return; }
   nickname = nick;
 
-  // Read settings from form
   const boardSize = parseInt(document.getElementById('opt-size').value);
   let winCount = parseInt(document.getElementById('opt-wins').value);
   let timeLimit = parseInt(document.getElementById('opt-time').value);
   const forbiddenBlack = document.getElementById('opt-forbidden').checked;
   let firstPlayer = document.getElementById('opt-first').value;
 
-  // Validate
   if (isNaN(winCount) || winCount < 1) { lobbyMsg('勝利局數須≥1', true); return; }
   if (isNaN(timeLimit) || timeLimit < 0) { lobbyMsg('限時須≥0', true); return; }
   if (timeLimit > 3600) { lobbyMsg('限時最多3600秒', true); return; }
 
-  // Random first player
   if (firstPlayer === 'random') {
     firstPlayer = Math.random() < 0.5 ? 'black' : 'white';
   }
@@ -123,7 +114,6 @@ window.joinRoomById = async function() {
   if (d.status !== 'waiting') { lobbyMsg('房間已開始或已滿', true); return; }
 
   const s = d.settings || {};
-  // The joiner takes the opposite color
   const joinColor = s.firstPlayer === 'black' ? 'white' : 'black';
   const upd = { status: 'playing' };
   upd[joinColor] = { name: nick, connected: true };
@@ -145,9 +135,6 @@ function lobbyMsg(msg, err=false) {
   el.style.color = err ? '#e74c3c' : '#27ae60';
 }
 
-/* ══════════════════════════════════════
-   JOIN & SYNC
-══════════════════════════════════════ */
 function joinRoom(id) {
   roomRef = ref(db, `rooms/${id}`);
   chatRef = ref(db, `rooms/${id}/chat`);
@@ -171,7 +158,6 @@ function syncState(d) {
   STEP    = (CSIZE - PADDING*2) / (BSIZE-1);
   roomSettings = s;
 
-  // Rebuild local board
   localBoard = [];
   const flat = d.board || Array(BSIZE*BSIZE).fill(0);
   for (let r=0;r<BSIZE;r++) {
@@ -185,7 +171,6 @@ function syncState(d) {
   gameOver  = d.status === 'over';
   scores    = d.scores    || { black:0, white:0 };
 
-  // Resize canvas for board size
   canvas.width = canvas.height = CSIZE;
 
   updateUI(d);
@@ -194,7 +179,6 @@ function syncState(d) {
 
   if (gameOver && winLine.length) setTimeout(() => showWin(d), 400);
 
-  // Timer
   clearInterval(timerInterval);
   if (!gameOver && s.timeLimit > 0 && d.timerStart) {
     const elapsed = (Date.now() - d.timerStart) / 1000;
@@ -206,9 +190,6 @@ function syncState(d) {
   }
 }
 
-/* ══════════════════════════════════════
-   GAME LOGIC
-══════════════════════════════════════ */
 canvas.addEventListener('click', async e => {
   if (gameOver) return;
   const rect = canvas.getBoundingClientRect();
@@ -225,7 +206,6 @@ canvas.addEventListener('click', async e => {
 
   const player = myColor === 'black' ? 1 : 2;
 
-  // Forbidden move check (black only, 三三/四四)
   if (d.settings?.forbiddenBlack && myColor === 'black') {
     const reason = checkForbidden(d.board, row, col, player);
     if (reason) { showForbiddenFlash(reason); return; }
@@ -284,7 +264,6 @@ function checkWin(flat, r, c, p, size) {
   return null;
 }
 
-// Simplified forbidden: detect open-three or open-four double (三三 / 四四)
 function checkForbidden(flat, r, c, p) {
   const size = BSIZE;
   const tmp = [...flat]; tmp[r*size+c] = p;
@@ -314,9 +293,6 @@ function showForbiddenFlash(reason) {
   setTimeout(() => el.style.opacity='0', 1800);
 }
 
-/* ══════════════════════════════════════
-   TIMER
-══════════════════════════════════════ */
 function startTimerDisplay(currentTurn) {
   clearInterval(timerInterval);
   if (!roomSettings.timeLimit) return;
@@ -325,7 +301,6 @@ function startTimerDisplay(currentTurn) {
     updateTimerUI(timeLeft, currentTurn);
     if (timeLeft <= 0) {
       clearInterval(timerInterval);
-      // Only the current turn's player triggers timeout
       if (currentTurn === myColor) {
         const snap = await get(roomRef);
         const d = snap.val();
@@ -355,9 +330,6 @@ function updateTimerUI(t, currentTurn) {
   el.style.color = t <= 10 ? '#e74c3c' : 'var(--gold)';
 }
 
-/* ══════════════════════════════════════
-   RESET / LEAVE
-══════════════════════════════════════ */
 window.resetGame = async function() {
   clearInterval(timerInterval);
   document.getElementById('win-overlay').classList.remove('visible');
@@ -365,7 +337,6 @@ window.resetGame = async function() {
   const snap = await get(roomRef);
   const d = snap.val();
   if (!d) return;
-  // Swap first player each round
   const nextFirst = d.settings?.firstPlayer === 'black' ? 'white' : 'black';
   const newSettings = { ...d.settings, firstPlayer: nextFirst };
   await update(roomRef, {
@@ -383,9 +354,6 @@ window.resetGame = async function() {
 
 window.leaveRoom = function() { location.reload(); };
 
-/* ══════════════════════════════════════
-   CHAT
-══════════════════════════════════════ */
 window.sendChat = async function() {
   const inp = document.getElementById('chat-input');
   const msg = inp.value.trim(); if (!msg||!chatRef) return;
@@ -404,9 +372,6 @@ function renderChat(data) {
 }
 function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');}
 
-/* ══════════════════════════════════════
-   UI
-══════════════════════════════════════ */
 function updateUI(d) {
   const s = d.settings || {};
   const isMyTurn = d.currentTurn === myColor;
@@ -431,7 +396,6 @@ function updateUI(d) {
   document.getElementById('score-white').textContent = d.scores?.white || 0;
   document.getElementById('score-target').textContent = `目標 ${Math.ceil(s.winCount||1)} 勝`;
 
-  // Timer
   if (s.timeLimit > 0 && !gameOver) {
     timeLeft = s.timeLimit;
     startTimerDisplay(d.currentTurn);
@@ -478,9 +442,6 @@ function showWin(d) {
   document.getElementById('win-overlay').classList.add('visible');
 }
 
-/* ══════════════════════════════════════
-   CANVAS
-══════════════════════════════════════ */
 function render() {
   ctx.clearRect(0,0,CSIZE,CSIZE);
   drawBoard();
@@ -507,11 +468,9 @@ function drawBoard(){
     ctx.beginPath();ctx.moveTo(bx,by);ctx.lineTo(bx2,by2);ctx.stroke();
   }
   ctx.strokeStyle='#7a5820';ctx.lineWidth=2;ctx.strokeRect(PADDING,PADDING,(BSIZE-1)*STEP,(BSIZE-1)*STEP);
-  // Stars
   const mid=Math.floor(BSIZE/2), stars=BSIZE===19?[[3,3],[3,9],[3,15],[9,3],[9,9],[9,15],[15,3],[15,9],[15,15]]:BSIZE===13?[[3,3],[3,9],[6,6],[9,3],[9,9]]:[[3,3],[3,11],[7,7],[11,3],[11,11]];
   ctx.fillStyle='#7a5820';
   stars.forEach(([c,r])=>{const[x,y]=xy(c,r);ctx.beginPath();ctx.arc(x,y,3.5,0,Math.PI*2);ctx.fill();});
-  // Coords
   ctx.fillStyle='rgba(100,68,20,0.6)';ctx.font=`${Math.max(8,10-Math.floor((BSIZE-15)/2))}px Noto Serif TC`;
   ctx.textAlign='center';ctx.textBaseline='middle';
   for(let i=0;i<BSIZE;i++){
@@ -553,7 +512,7 @@ function drawWinLine(line){
 }
 
 function resizeCanvas(){
-  const s=Math.min(window.innerWidth-440,CSIZE,window.innerHeight-160);
+  const s=Math.min(window.innerWidth-60,CSIZE,window.innerHeight-240);
   canvas.style.width=s+'px';canvas.style.height=s+'px';
 }
 window.addEventListener('resize',resizeCanvas);
@@ -564,97 +523,108 @@ drawBoard();
 <style>
 :root{--board-dark:#9c7a3a;--bg:#1a1410;--panel:#221c14;--gold:#d4a94a;--gold-l:#f0c96a;--text:#f0e6cc;--muted:#a08860;}
 *{box-sizing:border-box;margin:0;padding:0}
-body{background:var(--bg);color:var(--text);font-family:'Noto Serif TC',serif;min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;background-image:radial-gradient(ellipse at 20% 20%,rgba(180,140,60,.08) 0%,transparent 60%),radial-gradient(ellipse at 80% 80%,rgba(120,60,20,.1) 0%,transparent 60%);padding:1rem 0}
-h1{font-family:'Cinzel',serif;font-size:clamp(1.3rem,3vw,2rem);color:var(--gold);text-shadow:0 0 30px rgba(212,169,74,.4);letter-spacing:.3em;text-align:center;margin-bottom:.2rem}
-.sub{font-size:.72rem;color:var(--muted);letter-spacing:.2em;text-align:center;margin-bottom:1rem}
+body{background:var(--bg);color:var(--text);font-family:'Noto Serif TC',serif;min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;background-image:radial-gradient(ellipse at 20% 20%,rgba(180,140,60,.08) 0%,transparent 60%),radial-gradient(ellipse at 80% 80%,rgba(120,60,20,.1) 0%,transparent 60%);padding:1.5rem}
+h1{font-family:'Cinzel',serif;font-size:clamp(1.6rem,5vw,2.5rem);color:var(--gold);text-shadow:0 0 30px rgba(212,169,74,.4);letter-spacing:.3em;text-align:center;margin-bottom:.3rem}
+.sub{font-size:.95rem;color:var(--muted);letter-spacing:.2em;text-align:center;margin-bottom:1.5rem}
 
 /* LOBBY */
-#lobby{background:var(--panel);border:1px solid rgba(212,169,74,.2);border-radius:16px;padding:1.6rem;width:420px;max-width:96vw}
-.lobby-title{font-family:'Cinzel',serif;font-size:.95rem;color:var(--gold);letter-spacing:.2em;margin-bottom:1rem;text-align:center}
-.field-label{font-size:.65rem;color:var(--muted);letter-spacing:.12em;text-transform:uppercase;margin-bottom:.3rem}
-input[type=text],input[type=number],select{width:100%;padding:.55rem .85rem;background:rgba(255,255,255,.05);border:1px solid rgba(212,169,74,.25);border-radius:6px;color:var(--text);font-family:'Noto Serif TC',serif;font-size:.82rem;outline:none;margin-bottom:.7rem;appearance:none}
-input[type=text]:focus,input[type=number]:focus,select:focus{border-color:var(--gold)}
+#lobby{background:var(--panel);border:1px solid rgba(212,169,74,.2);border-radius:20px;padding:2rem 1.8rem;width:clamp(320px,95vw,520px)}
+.lobby-title{font-family:'Cinzel',serif;font-size:1.2rem;color:var(--gold);letter-spacing:.2em;margin-bottom:1.5rem;text-align:center}
+.field-label{font-size:.85rem;color:var(--muted);letter-spacing:.12em;text-transform:uppercase;margin-bottom:.5rem;font-weight:600}
+input[type=text],input[type=number],select{width:100%;padding:.85rem 1rem;background:rgba(255,255,255,.05);border:2px solid rgba(212,169,74,.25);border-radius:8px;color:var(--text);font-family:'Noto Serif TC',serif;font-size:1rem;outline:none;margin-bottom:1rem;appearance:none}
+input[type=text]:focus,input[type=number]:focus,select:focus{border-color:var(--gold);background:rgba(212,169,74,.08)}
 input::placeholder{color:var(--muted)}
 select option{background:#221c14;color:var(--text)}
-.settings-grid{display:grid;grid-template-columns:1fr 1fr;gap:.5rem .8rem;margin-bottom:.8rem}
+.settings-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem;margin-bottom:1.2rem}
 .settings-grid .field{display:flex;flex-direction:column}
 .settings-grid select{margin-bottom:0}
-.checkbox-row{display:flex;align-items:center;gap:.5rem;padding:.45rem .6rem;background:rgba(255,255,255,.03);border:1px solid rgba(212,169,74,.15);border-radius:6px;cursor:pointer;margin-bottom:.7rem}
-.checkbox-row input[type=checkbox]{width:16px;height:16px;accent-color:var(--gold);margin:0;flex-shrink:0}
-.checkbox-row label{font-size:.78rem;color:var(--text);cursor:pointer;line-height:1.4}
-.checkbox-row label small{display:block;font-size:.65rem;color:var(--muted)}
-.btn-row{display:grid;grid-template-columns:1fr 1fr;gap:.5rem;margin-bottom:.6rem}
-.btn{padding:.58rem;background:transparent;border:1px solid rgba(212,169,74,.35);color:var(--gold);border-radius:6px;cursor:pointer;font-family:'Noto Serif TC',serif;font-size:.78rem;letter-spacing:.08em;transition:all .2s}
+.settings-grid input{margin-bottom:0}
+.checkbox-row{display:flex;align-items:flex-start;gap:.8rem;padding:.8rem 1rem;background:rgba(255,255,255,.03);border:2px solid rgba(212,169,74,.15);border-radius:8px;cursor:pointer;margin-bottom:1rem}
+.checkbox-row input[type=checkbox]{width:24px;height:24px;accent-color:var(--gold);margin:0;flex-shrink:0;cursor:pointer}
+.checkbox-row label{font-size:1rem;color:var(--text);cursor:pointer;line-height:1.6;flex:1}
+.checkbox-row label small{display:block;font-size:.8rem;color:var(--muted);margin-top:.3rem}
+.btn-row{display:grid;grid-template-columns:1fr 1fr;gap:.7rem;margin-bottom:.8rem}
+.btn{padding:.9rem 1rem;background:transparent;border:2px solid rgba(212,169,74,.35);color:var(--gold);border-radius:8px;cursor:pointer;font-family:'Noto Serif TC',serif;font-size:.95rem;letter-spacing:.1em;transition:all .2s;font-weight:600}
 .btn:hover{background:rgba(212,169,74,.12);border-color:var(--gold)}
+.btn:active{transform:scale(.98)}
 .btn-full{grid-column:1/-1}
-.lobby-msg{font-size:.78rem;text-align:center;min-height:1.1em;margin-bottom:.4rem}
-.dv{height:1px;background:rgba(212,169,74,.12);margin:.7rem 0}
-#invite-line{display:none;align-items:center;gap:.5rem;margin-bottom:.4rem}
-#room-code-display{font-family:'Cinzel',serif;font-size:1.3rem;color:var(--gold);letter-spacing:.35em;flex:1;text-align:center}
-#waiting-msg{display:none;text-align:center;font-size:.72rem;color:var(--muted);letter-spacing:.1em;animation:pulse 2s infinite}
+.lobby-msg{font-size:.95rem;text-align:center;min-height:1.4em;margin-bottom:.6rem;font-weight:500}
+.dv{height:2px;background:rgba(212,169,74,.12);margin:1rem 0}
+#invite-line{display:none;align-items:center;gap:.8rem;margin-bottom:.8rem;background:rgba(212,169,74,.08);padding:1rem;border-radius:8px;border:1px solid rgba(212,169,74,.2)}
+#room-code-display{font-family:'Cinzel',serif;font-size:1.8rem;color:var(--gold);letter-spacing:.4em;flex:1;text-align:center}
+#waiting-msg{display:none;text-align:center;font-size:.9rem;color:var(--muted);letter-spacing:.1em;animation:pulse 2s infinite;padding:1rem;border:2px dashed rgba(212,169,74,.2);border-radius:8px}
 @keyframes pulse{0%,100%{opacity:.4}50%{opacity:1}}
 
 /* GAME */
-#game{display:none;align-items:flex-start;gap:1.1rem;flex-wrap:wrap;justify-content:center}
-.side{background:var(--panel);border:1px solid rgba(212,169,74,.2);border-radius:12px;padding:1rem;width:162px;display:flex;flex-direction:column;gap:.75rem}
-.sec-label{font-size:.6rem;color:var(--muted);letter-spacing:.15em;text-transform:uppercase}
-.player-card{background:rgba(255,255,255,.03);border-radius:8px;padding:.75rem;border:1.5px solid transparent;transition:border-color .3s,background .3s;position:relative;overflow:hidden}
+#game{display:none;align-items:flex-start;gap:1.5rem;flex-wrap:wrap;justify-content:center;width:100%}
+.side{background:var(--panel);border:1px solid rgba(212,169,74,.2);border-radius:16px;padding:1.5rem;width:clamp(280px,100%,200px);display:flex;flex-direction:column;gap:1rem}
+@media(max-width:680px){.side{width:100%;max-width:100%}}
+.sec-label{font-size:.8rem;color:var(--muted);letter-spacing:.15em;text-transform:uppercase;font-weight:600}
+.player-card{background:rgba(255,255,255,.03);border-radius:10px;padding:1.2rem;border:2px solid transparent;transition:border-color .3s,background .3s;position:relative;overflow:hidden}
 .player-card.active{border-color:var(--gold);background:rgba(212,169,74,.06)}
 .player-card.active::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,var(--gold),transparent);animation:sh 2s infinite}
 @keyframes sh{0%,100%{opacity:.4}50%{opacity:1}}
-.stone-dot{width:26px;height:26px;border-radius:50%;margin-bottom:.35rem}
+.stone-dot{width:40px;height:40px;border-radius:50%;margin-bottom:.6rem}
 .stone-dot.black{background:radial-gradient(circle at 35% 35%,#555,#111);box-shadow:inset -2px -2px 5px rgba(0,0,0,.8)}
 .stone-dot.white{background:radial-gradient(circle at 35% 35%,#fff,#d8cfc0);box-shadow:inset -2px -2px 5px rgba(0,0,0,.2)}
-.pname{font-size:.8rem;color:var(--text);font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.plabel{font-size:.62rem;color:var(--muted);margin-top:1px}
-.score-row{display:flex;justify-content:space-between;align-items:baseline;margin-top:.3rem}
-.score-num{font-family:'Cinzel',serif;font-size:1.1rem;color:var(--gold)}
-.score-lbl{font-size:.6rem;color:var(--muted)}
-.my-badge{font-size:.65rem;color:rgba(212,169,74,.7);text-align:center;padding:.28rem;border:1px dashed rgba(212,169,74,.2);border-radius:4px}
-.score-target{font-size:.65rem;color:var(--muted);text-align:center;letter-spacing:.08em}
-.turn-box{text-align:center;padding:.5rem;background:rgba(212,169,74,.08);border-radius:6px;border:1px solid rgba(212,169,74,.15)}
-.turn-lbl{font-size:.65rem;color:var(--muted)}
-.turn-name{font-size:.78rem;color:var(--gold);font-weight:700;margin-top:2px;min-height:1em}
-#timer-display{display:none;text-align:center;font-family:'Cinzel',serif;font-size:.82rem;color:var(--gold);padding:.3rem;border:1px solid rgba(212,169,74,.2);border-radius:5px;letter-spacing:.08em}
-.stat-grid{display:grid;grid-template-columns:1fr 1fr;gap:5px}
-.stat-cell{text-align:center;padding:.4rem;background:rgba(255,255,255,.03);border-radius:5px;border:1px solid rgba(212,169,74,.1)}
-.stat-num{font-family:'Cinzel',serif;font-size:1.1rem;color:var(--gold)}
-.stat-lbl{font-size:.58rem;color:var(--muted);margin-top:1px}
-.dv{height:1px;background:rgba(212,169,74,.12)}
-.btn-sm{width:100%;padding:.5rem;background:transparent;border:1px solid rgba(212,169,74,.3);color:var(--gold);border-radius:6px;cursor:pointer;font-family:'Noto Serif TC',serif;font-size:.72rem;letter-spacing:.08em;transition:all .2s}
+.pname{font-size:1rem;color:var(--text);font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.plabel{font-size:.8rem;color:var(--muted);margin-top:.3rem}
+.score-row{display:flex;justify-content:space-between;align-items:baseline;margin-top:.5rem}
+.score-num{font-family:'Cinzel',serif;font-size:1.4rem;color:var(--gold);font-weight:700}
+.score-lbl{font-size:.8rem;color:var(--muted)}
+.my-badge{font-size:.88rem;color:rgba(212,169,74,.8);text-align:center;padding:.5rem;border:2px dashed rgba(212,169,74,.2);border-radius:6px;font-weight:600}
+.score-target{font-size:.85rem;color:var(--muted);text-align:center;letter-spacing:.08em}
+.turn-box{text-align:center;padding:.9rem;background:rgba(212,169,74,.08);border-radius:8px;border:2px solid rgba(212,169,74,.15)}
+.turn-lbl{font-size:.8rem;color:var(--muted);text-transform:uppercase}
+.turn-name{font-size:1.05rem;color:var(--gold);font-weight:700;margin-top:.4rem;min-height:1.3em}
+#timer-display{display:none;text-align:center;font-family:'Cinzel',serif;font-size:1.1rem;color:var(--gold);padding:.6rem;border:2px solid rgba(212,169,74,.2);border-radius:8px;letter-spacing:.08em;font-weight:700}
+.stat-grid{display:grid;grid-template-columns:1fr 1fr;gap:.8rem}
+.stat-cell{text-align:center;padding:.9rem;background:rgba(255,255,255,.03);border-radius:8px;border:2px solid rgba(212,169,74,.1)}
+.stat-num{font-family:'Cinzel',serif;font-size:1.5rem;color:var(--gold);font-weight:700}
+.stat-lbl{font-size:.8rem;color:var(--muted);margin-top:.4rem;text-transform:uppercase}
+.btn-sm{width:100%;padding:.8rem;background:transparent;border:2px solid rgba(212,169,74,.3);color:var(--gold);border-radius:8px;cursor:pointer;font-family:'Noto Serif TC',serif;font-size:.95rem;letter-spacing:.1em;transition:all .2s;font-weight:600}
 .btn-sm:hover{background:rgba(212,169,74,.1)}
+.btn-sm:active{transform:scale(.98)}
 .btn-sm.red{border-color:rgba(192,57,43,.35);color:#e74c3c}
 .btn-sm.red:hover{background:rgba(192,57,43,.08)}
-.rules-txt{font-size:.63rem;color:var(--muted);line-height:1.9;letter-spacing:.03em}
+.rules-txt{font-size:.85rem;color:var(--muted);line-height:2;letter-spacing:.03em}
 /* Chat */
-.chat-wrap{display:flex;flex-direction:column;gap:4px}
-#chat-messages{max-height:130px;overflow-y:auto;font-size:.66rem;line-height:1.75;scrollbar-width:thin;scrollbar-color:rgba(212,169,74,.25) transparent}
-.chat-empty{color:rgba(160,136,96,.4);font-size:.66rem}
-.chat-msg{margin-bottom:2px}
-.chat-who{color:var(--muted);margin-right:3px;font-size:.62rem}
+.chat-wrap{display:flex;flex-direction:column;gap:.6rem}
+#chat-messages{max-height:180px;overflow-y:auto;font-size:.9rem;line-height:1.9;scrollbar-width:thin;scrollbar-color:rgba(212,169,74,.25) transparent;padding:.5rem}
+.chat-empty{color:rgba(160,136,96,.4);font-size:.9rem}
+.chat-msg{margin-bottom:.4rem}
+.chat-who{color:var(--muted);margin-right:.4rem;font-size:.8rem;font-weight:600}
 .chat-text{color:var(--text)}
 .chat-msg.mine .chat-who{color:var(--gold)}
-.chat-row{display:flex;gap:4px;margin-top:4px}
-.chat-row input{flex:1;padding:.32rem .55rem;background:rgba(255,255,255,.05);border:1px solid rgba(212,169,74,.2);border-radius:4px;color:var(--text);font-family:'Noto Serif TC',serif;font-size:.7rem;outline:none;min-width:0}
+.chat-row{display:flex;gap:.6rem;margin-top:.6rem}
+.chat-row input{flex:1;padding:.6rem .8rem;background:rgba(255,255,255,.05);border:2px solid rgba(212,169,74,.2);border-radius:6px;color:var(--text);font-family:'Noto Serif TC',serif;font-size:.95rem;outline:none;min-width:0}
 .chat-row input:focus{border-color:rgba(212,169,74,.45)}
-.chat-row button{padding:.32rem .55rem;background:rgba(212,169,74,.13);border:1px solid rgba(212,169,74,.28);color:var(--gold);border-radius:4px;cursor:pointer;font-size:.7rem;white-space:nowrap}
+.chat-row button{padding:.6rem .8rem;background:rgba(212,169,74,.15);border:2px solid rgba(212,169,74,.3);color:var(--gold);border-radius:6px;cursor:pointer;font-size:.9rem;white-space:nowrap;font-weight:600;transition:all .2s}
+.chat-row button:hover{background:rgba(212,169,74,.25)}
 /* Board */
 .board-wrap{position:relative}
-canvas#board{display:block;border-radius:4px;cursor:crosshair;box-shadow:0 0 0 6px var(--board-dark),0 0 0 10px rgba(212,169,74,.15),0 20px 60px rgba(0,0,0,.7)}
+canvas#board{display:block;border-radius:6px;cursor:crosshair;box-shadow:0 0 0 8px var(--board-dark),0 0 0 12px rgba(212,169,74,.15),0 25px 70px rgba(0,0,0,.7)}
 /* Forbidden flash */
-#forbidden-flash{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(180,30,30,.9);color:#fff;padding:.5rem 1.2rem;border-radius:8px;font-size:.85rem;letter-spacing:.1em;opacity:0;transition:opacity .4s;pointer-events:none;white-space:nowrap}
+#forbidden-flash{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(180,30,30,.9);color:#fff;padding:1rem 1.5rem;border-radius:10px;font-size:1.1rem;letter-spacing:.1em;opacity:0;transition:opacity .4s;pointer-events:none;white-space:nowrap;font-weight:700}
 /* Win overlay */
-.win-overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.65);border-radius:4px;opacity:0;pointer-events:none;transition:opacity .4s;backdrop-filter:blur(2px)}
+.win-overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.65);border-radius:6px;opacity:0;pointer-events:none;transition:opacity .4s;backdrop-filter:blur(2px)}
 .win-overlay.visible{opacity:1;pointer-events:all}
-.win-box{background:var(--panel);border:1px solid var(--gold);border-radius:16px;padding:1.6rem 2rem;text-align:center;box-shadow:0 0 60px rgba(212,169,74,.2);animation:popIn .4s cubic-bezier(.34,1.56,.64,1) forwards}
+.win-box{background:var(--panel);border:2px solid var(--gold);border-radius:20px;padding:2.2rem 2.5rem;text-align:center;box-shadow:0 0 60px rgba(212,169,74,.2);animation:popIn .4s cubic-bezier(.34,1.56,.64,1) forwards}
 @keyframes popIn{from{transform:scale(.75);opacity:0}to{transform:scale(1);opacity:1}}
-.win-emoji{font-size:2rem;margin-bottom:.35rem}
-.win-title{font-family:'Cinzel',serif;font-size:1.3rem;color:var(--gold);letter-spacing:.2em;margin-bottom:.2rem}
-.win-sub{font-size:.78rem;color:var(--muted);margin-bottom:.9rem;white-space:pre-line}
-.win-btn{padding:.55rem 1.6rem;background:var(--gold);color:#1a1410;border:none;border-radius:6px;cursor:pointer;font-family:'Noto Serif TC',serif;font-size:.8rem;font-weight:700;letter-spacing:.12em;transition:all .2s;margin:.25rem;display:block;width:100%}
-.win-btn:hover{background:var(--gold-l)}
-.win-btn.sec{background:transparent;border:1px solid rgba(212,169,74,.35);color:var(--gold)}
-footer{margin-top:.7rem;font-size:.62rem;color:var(--muted);letter-spacing:.1em;text-align:center}
+.win-emoji{font-size:2.8rem;margin-bottom:.5rem}
+.win-title{font-family:'Cinzel',serif;font-size:1.6rem;color:var(--gold);letter-spacing:.2em;margin-bottom:.3rem}
+.win-sub{font-size:1rem;color:var(--muted);margin-bottom:1.2rem;white-space:pre-line;line-height:1.7}
+.win-btn{padding:.9rem 2rem;background:var(--gold);color:#1a1410;border:none;border-radius:8px;cursor:pointer;font-family:'Noto Serif TC',serif;font-size:1rem;font-weight:700;letter-spacing:.12em;transition:all .2s;margin:.4rem;display:block;width:100%}
+.win-btn:hover{background:var(--gold-l);transform:scale(1.02)}
+.win-btn:active{transform:scale(.98)}
+.win-btn.sec{background:transparent;border:2px solid rgba(212,169,74,.4);color:var(--gold)}
+footer{margin-top:1.5rem;font-size:.8rem;color:var(--muted);letter-spacing:.1em;text-align:center}
+@media(max-width:680px){
+  body{padding:1rem}
+  .side{width:100% !important}
+  #game{flex-direction:column;width:100vw;max-width:100%}
+  .settings-grid{grid-template-columns:1fr}
+}
 </style>
 </head>
 <body>
@@ -669,7 +639,7 @@ footer{margin-top:.7rem;font-size:.62rem;color:var(--muted);letter-spacing:.1em;
   <input type="text" id="nick-input" placeholder="輸入暱稱（最多12字）" maxlength="12">
 
   <div class="dv"></div>
-  <div class="field-label" style="margin-bottom:.6rem">房間設定（建立時有效）</div>
+  <div class="field-label" style="margin-bottom:1rem">房間設定（建立時有效）</div>
 
   <div class="settings-grid">
     <div class="field">
@@ -710,9 +680,9 @@ footer{margin-top:.7rem;font-size:.62rem;color:var(--muted);letter-spacing:.1em;
   </div>
 
   <div id="invite-line">
-    <span style="font-size:.68rem;color:var(--muted)">房間號</span>
+    <span style="font-size:.88rem;color:var(--muted)">房間號</span>
     <span id="room-code-display"></span>
-    <button class="btn" style="padding:.28rem .6rem;font-size:.7rem" onclick="copyRoomCode()">複製</button>
+    <button class="btn" style="padding:.5rem .8rem;font-size:.9rem" onclick="copyRoomCode()">複製</button>
   </div>
   <div id="waiting-msg">等待對手加入中…</div>
 
