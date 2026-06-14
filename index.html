@@ -1,0 +1,595 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>五子棋 Online · Gomoku</title>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Serif+TC:wght@400;700&family=Cinzel:wght@400;700&display=swap" rel="stylesheet">
+
+<!-- ╔══════════════════════════════════════════════╗ -->
+<!-- ║   請將下方 firebaseConfig 換成你自己的設定值    ║ -->
+<!-- ╚══════════════════════════════════════════════╝ -->
+<script type="module">
+import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+import { getDatabase, ref, set, get, update, onValue, push, serverTimestamp, remove }
+  from "https://www.gstatic.com/firebasejs/10.12.2/firebase-database.js";
+
+const firebaseConfig = {
+  apiKey:            "AIzaSyDQWxD4rq2U0UkgrSBRMJ5IA_Wp9BwBT7c",
+  authDomain:        "gomoku-285d2.firebaseapp.com",
+  databaseURL:       "https://gomoku-285d2-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId:         "gomoku-285d2",
+  storageBucket:     "gomoku-285d2.firebasestorage.app",
+  messagingSenderId: "168545740750",
+  appId:             "1:168545740750:web:1c232ee1b03dc5a7d42d9f"
+};
+
+const app = initializeApp(firebaseConfig);
+const db  = getDatabase(app);
+
+/* ─── constants ─── */
+const SIZE = 15, PADDING = 30, CANVAS_SIZE = 540;
+const STEP = (CANVAS_SIZE - PADDING * 2) / (SIZE - 1);
+const COLS = 'ABCDEFGHJKLMNOP';
+
+/* ─── state ─── */
+let myColor   = null;   // 'black' | 'white'
+let roomId    = null;
+let nickname  = '';
+let gameOver  = false;
+let localBoard = Array(SIZE).fill(null).map(()=>Array(SIZE).fill(0));
+let lastMove  = null;
+let winLine   = [];
+let moveCount = 0;
+let roomRef, boardRef, chatRef, statusRef;
+let unsubBoard, unsubChat, unsubStatus;
+
+/* ─── canvas ─── */
+const canvas = document.getElementById('board');
+const ctx    = canvas.getContext('2d');
+
+/* ──────────────────────────────────────────────── */
+/*  LOBBY LOGIC                                      */
+/* ──────────────────────────────────────────────── */
+window.createRoom = async function() {
+  const nick = document.getElementById('nick-input').value.trim();
+  if (!nick) { showLobbyMsg('請輸入暱稱', true); return; }
+  nickname = nick;
+  const id  = Math.random().toString(36).slice(2,8).toUpperCase();
+  const rRef = ref(db, `rooms/${id}`);
+  await set(rRef, {
+    black: { name: nick, connected: true },
+    white: null,
+    board: Array(SIZE*SIZE).fill(0),
+    currentTurn: 'black',
+    status: 'waiting',
+    createdAt: serverTimestamp(),
+    moveCount: 0
+  });
+  roomId   = id;
+  myColor  = 'black';
+  joinRoom(id);
+  showLobbyMsg(`房間已建立！房間號：${id}`, false);
+  document.getElementById('room-code-display').textContent = id;
+  document.getElementById('invite-line').style.display = 'flex';
+  document.getElementById('waiting-msg').style.display  = 'block';
+};
+
+window.joinRoomById = async function() {
+  const nick = document.getElementById('nick-input').value.trim();
+  const id   = document.getElementById('room-input').value.trim().toUpperCase();
+  if (!nick) { showLobbyMsg('請輸入暱稱', true); return; }
+  if (!id)   { showLobbyMsg('請輸入房間號', true); return; }
+  nickname = nick;
+  const rRef = ref(db, `rooms/${id}`);
+  const snap = await get(rRef);
+  if (!snap.exists()) { showLobbyMsg('房間不存在', true); return; }
+  const data = snap.val();
+  if (data.white) { showLobbyMsg('房間已滿', true); return; }
+  await update(rRef, { 'white': { name: nick, connected: true }, status: 'playing' });
+  roomId   = id;
+  myColor  = 'white';
+  joinRoom(id);
+};
+
+window.copyRoomCode = function() {
+  const code = document.getElementById('room-code-display').textContent;
+  navigator.clipboard.writeText(code).then(()=>showLobbyMsg('已複製房間號！'));
+};
+
+function showLobbyMsg(msg, isErr=false) {
+  const el = document.getElementById('lobby-msg');
+  el.textContent = msg;
+  el.style.color = isErr ? '#e74c3c' : '#27ae60';
+}
+
+function joinRoom(id) {
+  roomRef   = ref(db, `rooms/${id}`);
+  boardRef  = ref(db, `rooms/${id}/board`);
+  chatRef   = ref(db, `rooms/${id}/chat`);
+  statusRef = ref(db, `rooms/${id}/status`);
+
+  // Watch full room state
+  unsubBoard = onValue(roomRef, snap => {
+    if (!snap.exists()) return;
+    const d = snap.val();
+
+    // Show game once both joined
+    if (d.status === 'playing' || d.status === 'over') {
+      document.getElementById('lobby').style.display   = 'none';
+      document.getElementById('game').style.display    = 'flex';
+      syncFromFirebase(d);
+    }
+    if (d.status === 'waiting') {
+      document.getElementById('waiting-msg').style.display = 'block';
+    }
+  });
+
+  // Watch chat
+  unsubChat = onValue(chatRef, snap => {
+    renderChat(snap.val());
+  });
+}
+
+function syncFromFirebase(d) {
+  // Rebuild board
+  const flat = d.board || Array(SIZE*SIZE).fill(0);
+  for (let r=0;r<SIZE;r++)
+    for (let c=0;c<SIZE;c++)
+      localBoard[r][c] = flat[r*SIZE+c];
+
+  moveCount = d.moveCount || 0;
+  lastMove  = d.lastMove  || null;
+  winLine   = d.winLine   || [];
+  gameOver  = d.status === 'over';
+
+  updateUI(d);
+  render();
+
+  if (gameOver && winLine.length) {
+    setTimeout(()=>showWinOverlay(d.winner, d.winnerName), 400);
+  }
+}
+
+/* ──────────────────────────────────────────────── */
+/*  GAME LOGIC                                       */
+/* ──────────────────────────────────────────────── */
+canvas.addEventListener('click', async e => {
+  if (gameOver) return;
+  const rect = canvas.getBoundingClientRect();
+  const sx = CANVAS_SIZE / rect.width, sy = CANVAS_SIZE / rect.height;
+  const x  = (e.clientX - rect.left) * sx;
+  const y  = (e.clientY - rect.top)  * sy;
+  const col = Math.round((x - PADDING) / STEP);
+  const row = Math.round((y - PADDING) / STEP);
+  if (col<0||col>=SIZE||row<0||row>=SIZE) return;
+
+  // Fetch current turn from server
+  const snap = await get(roomRef);
+  const d = snap.val();
+  if (!d || d.status !== 'playing') return;
+  if (d.currentTurn !== myColor) return;
+  if (d.board[row*SIZE+col] !== 0) return;
+
+  const player = myColor === 'black' ? 1 : 2;
+  const newFlat = [...d.board];
+  newFlat[row*SIZE+col] = player;
+
+  const line = checkWin5(newFlat, row, col, player);
+  const nextTurn = myColor === 'black' ? 'white' : 'black';
+  const newCount = (d.moveCount||0) + 1;
+
+  const updates = {
+    board: newFlat,
+    currentTurn: line ? d.currentTurn : nextTurn,
+    lastMove: { col, row, player },
+    moveCount: newCount,
+    status: line ? 'over' : 'playing',
+  };
+  if (line) {
+    updates.winner     = myColor;
+    updates.winnerName = nickname;
+    updates.winLine    = line;
+  }
+  await update(roomRef, updates);
+});
+
+// Ghost on hover
+canvas.addEventListener('mousemove', e => {
+  if (gameOver) return;
+  const rect = canvas.getBoundingClientRect();
+  const sx = CANVAS_SIZE/rect.width, sy = CANVAS_SIZE/rect.height;
+  const x = (e.clientX-rect.left)*sx, y = (e.clientY-rect.top)*sy;
+  const col = Math.round((x-PADDING)/STEP), row = Math.round((y-PADDING)/STEP);
+  render();
+  if (col>=0&&col<SIZE&&row>=0&&row<SIZE&&localBoard[row][col]===0)
+    drawStone(col, row, myColor==='black'?1:2, true);
+});
+canvas.addEventListener('mouseleave', render);
+
+function checkWin5(flat, r, c, p) {
+  const dirs = [[0,1],[1,0],[1,1],[1,-1]];
+  for (const [dr,dc] of dirs) {
+    let cells = [[r,c]];
+    for (let d=1;d<=4;d++){const nr=r+dr*d,nc=c+dc*d;if(nr>=0&&nr<SIZE&&nc>=0&&nc<SIZE&&flat[nr*SIZE+nc]===p)cells.push([nr,nc]);else break;}
+    for (let d=1;d<=4;d++){const nr=r-dr*d,nc=c-dc*d;if(nr>=0&&nr<SIZE&&nc>=0&&nc<SIZE&&flat[nr*SIZE+nc]===p)cells.push([nr,nc]);else break;}
+    if (cells.length>=5){cells.sort((a,b)=>a[0]!==b[0]?a[0]-b[0]:a[1]-b[1]);return cells;}
+  }
+  return null;
+}
+
+window.resetGame = async function() {
+  document.getElementById('win-overlay').classList.remove('visible');
+  gameOver = false;
+  winLine  = [];
+  await update(roomRef, {
+    board: Array(SIZE*SIZE).fill(0),
+    currentTurn: 'black',
+    status: 'playing',
+    lastMove: null,
+    moveCount: 0,
+    winner: null,
+    winnerName: null,
+    winLine: null
+  });
+};
+
+window.leaveRoom = function() {
+  if (unsubBoard) unsubBoard();
+  if (unsubChat)  unsubChat();
+  location.reload();
+};
+
+/* ──────────────────────────────────────────────── */
+/*  CHAT                                             */
+/* ──────────────────────────────────────────────── */
+window.sendChat = async function() {
+  const inp = document.getElementById('chat-input');
+  const msg = inp.value.trim();
+  if (!msg || !chatRef) return;
+  inp.value = '';
+  await push(chatRef, {
+    name:  nickname,
+    color: myColor,
+    text:  msg,
+    ts:    serverTimestamp()
+  });
+};
+
+document.addEventListener('keydown', e => {
+  if (e.key === 'Enter' && document.activeElement === document.getElementById('chat-input'))
+    window.sendChat();
+});
+
+function renderChat(data) {
+  const box = document.getElementById('chat-messages');
+  if (!data) { box.innerHTML = '<div class="chat-empty">說點什麼吧…</div>'; return; }
+  const msgs = Object.values(data).sort((a,b)=>(a.ts||0)-(b.ts||0));
+  box.innerHTML = msgs.map(m => {
+    const isMine = m.name === nickname;
+    const stone  = m.color === 'black' ? '●' : '○';
+    return `<div class="chat-msg ${isMine?'mine':''}">
+      <span class="chat-who">${stone} ${escHtml(m.name)}</span>
+      <span class="chat-text">${escHtml(m.text)}</span>
+    </div>`;
+  }).join('');
+  box.scrollTop = box.scrollHeight;
+}
+
+function escHtml(s) {
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+/* ──────────────────────────────────────────────── */
+/*  UI helpers                                       */
+/* ──────────────────────────────────────────────── */
+function updateUI(d) {
+  const isMyTurn = d.currentTurn === myColor;
+  document.getElementById('turn-display').textContent =
+    d.status === 'over'    ? '對局結束' :
+    isMyTurn               ? '輪到你落子' :
+    d.currentTurn==='black'? '黑方落子中…' : '白方落子中…';
+
+  document.getElementById('card-black').classList.toggle('active', d.currentTurn==='black' && !gameOver);
+  document.getElementById('card-white').classList.toggle('active', d.currentTurn==='white' && !gameOver);
+  document.getElementById('stat-moves').textContent = d.moveCount || 0;
+
+  // Labels
+  const bname = d.black?.name || '黑方';
+  const wname = d.white?.name || '等待加入…';
+  document.getElementById('name-black').textContent = bname;
+  document.getElementById('name-white').textContent = wname;
+  document.getElementById('my-color-badge').textContent = myColor === 'black' ? `你是黑方 ${bname}` : `你是白方 ${wname}`;
+}
+
+function showWinOverlay(winner, name) {
+  document.getElementById('win-emoji').textContent  = winner === myColor ? '🥇' : '😢';
+  document.getElementById('win-title').textContent  = `${name} 勝利！`;
+  document.getElementById('win-sub').textContent    = `共 ${moveCount} 手`;
+  document.getElementById('win-overlay').classList.add('visible');
+}
+
+/* ──────────────────────────────────────────────── */
+/*  CANVAS DRAWING                                   */
+/* ──────────────────────────────────────────────── */
+function render() {
+  ctx.clearRect(0,0,CANVAS_SIZE,CANVAS_SIZE);
+  drawBoard();
+  for (let r=0;r<SIZE;r++)
+    for (let c=0;c<SIZE;c++)
+      if (localBoard[r][c]) drawStone(c,r,localBoard[r][c]);
+  if (lastMove) drawLastMark(lastMove.col, lastMove.row, lastMove.player);
+  if (winLine?.length) drawWinLine(winLine);
+}
+
+function getXY(c,r){return[PADDING+c*STEP, PADDING+r*STEP];}
+
+function drawBoard(){
+  const g=ctx.createLinearGradient(0,0,CANVAS_SIZE,CANVAS_SIZE);
+  g.addColorStop(0,'#d4aa62');g.addColorStop(.4,'#c8a050');g.addColorStop(1,'#b88c3a');
+  ctx.fillStyle=g; ctx.fillRect(0,0,CANVAS_SIZE,CANVAS_SIZE);
+  ctx.strokeStyle='rgba(140,90,20,0.06)';ctx.lineWidth=.5;
+  for(let i=0;i<CANVAS_SIZE;i+=8){ctx.beginPath();ctx.moveTo(0,i+Math.sin(i*.1)*3);ctx.lineTo(CANVAS_SIZE,i+Math.sin(i*.1)*3);ctx.stroke();}
+  ctx.strokeStyle='#8a6030';ctx.lineWidth=.8;
+  for(let i=0;i<SIZE;i++){
+    const[x1,y1]=getXY(i,0),[x2,y2]=getXY(i,SIZE-1);
+    ctx.beginPath();ctx.moveTo(x1,y1);ctx.lineTo(x2,y2);ctx.stroke();
+    const[bx1,by1]=getXY(0,i),[bx2,by2]=getXY(SIZE-1,i);
+    ctx.beginPath();ctx.moveTo(bx1,by1);ctx.lineTo(bx2,by2);ctx.stroke();
+  }
+  ctx.strokeStyle='#7a5820';ctx.lineWidth=2;
+  ctx.strokeRect(PADDING,PADDING,(SIZE-1)*STEP,(SIZE-1)*STEP);
+  ctx.fillStyle='#7a5820';
+  [[3,3],[3,11],[7,7],[11,3],[11,11]].forEach(([c,r])=>{
+    const[x,y]=getXY(c,r);ctx.beginPath();ctx.arc(x,y,4,0,Math.PI*2);ctx.fill();
+  });
+  ctx.fillStyle='rgba(100,68,20,0.6)';ctx.font='9px Noto Serif TC';ctx.textAlign='center';ctx.textBaseline='middle';
+  for(let i=0;i<SIZE;i++){
+    const[x]=getXY(i,0);ctx.fillText(COLS[i],x,PADDING-14);ctx.fillText(COLS[i],x,CANVAS_SIZE-PADDING+14);
+    const[,y]=getXY(0,i);ctx.textAlign='right';ctx.fillText(SIZE-i,PADDING-10,y);ctx.textAlign='left';ctx.fillText(SIZE-i,CANVAS_SIZE-PADDING+10,y);ctx.textAlign='center';
+  }
+}
+
+function drawStone(col,row,player,ghost=false){
+  const[x,y]=getXY(col,row),r=STEP*.44;
+  ctx.save();
+  if(ghost)ctx.globalAlpha=.35;
+  if(player===1){
+    const g=ctx.createRadialGradient(x-r*.3,y-r*.3,r*.05,x,y,r);
+    g.addColorStop(0,'#888');g.addColorStop(.3,'#333');g.addColorStop(1,'#0a0a0a');
+    ctx.fillStyle=g;ctx.beginPath();ctx.arc(x,y,r,0,Math.PI*2);ctx.fill();
+    ctx.fillStyle='rgba(255,255,255,0.18)';ctx.beginPath();ctx.ellipse(x-r*.25,y-r*.28,r*.28,r*.18,-Math.PI/5,0,Math.PI*2);ctx.fill();
+  }else{
+    const g=ctx.createRadialGradient(x-r*.3,y-r*.3,r*.05,x,y,r);
+    g.addColorStop(0,'#ffffff');g.addColorStop(.5,'#e8e0d0');g.addColorStop(1,'#c0b89a');
+    ctx.fillStyle=g;ctx.beginPath();ctx.arc(x,y,r,0,Math.PI*2);ctx.fill();
+    ctx.strokeStyle='rgba(150,130,90,0.4)';ctx.lineWidth=.5;ctx.stroke();
+    ctx.fillStyle='rgba(255,255,255,0.55)';ctx.beginPath();ctx.ellipse(x-r*.25,y-r*.28,r*.26,r*.16,-Math.PI/5,0,Math.PI*2);ctx.fill();
+  }
+  ctx.restore();
+}
+
+function drawLastMark(col,row,player){
+  const[x,y]=getXY(col,row);
+  ctx.strokeStyle=player===1?'rgba(255,220,80,0.9)':'rgba(180,80,40,0.8)';
+  ctx.lineWidth=1.5;ctx.beginPath();ctx.arc(x,y,5,0,Math.PI*2);ctx.stroke();
+}
+
+function drawWinLine(line){
+  if(!line||line.length<2)return;
+  const[x1,y1]=getXY(line[0][1],line[0][0]),[x2,y2]=getXY(line[line.length-1][1],line[line.length-1][0]);
+  ctx.strokeStyle='rgba(255,200,50,0.85)';ctx.lineWidth=4;ctx.lineCap='round';
+  ctx.shadowColor='rgba(255,200,50,0.5)';ctx.shadowBlur=8;
+  ctx.beginPath();ctx.moveTo(x1,y1);ctx.lineTo(x2,y2);ctx.stroke();ctx.shadowBlur=0;
+}
+
+// Responsive
+function resizeCanvas(){
+  const s=Math.min(window.innerWidth-480,540,window.innerHeight-160);
+  canvas.style.width=s+'px';canvas.style.height=s+'px';
+}
+window.addEventListener('resize',resizeCanvas);
+resizeCanvas();
+drawBoard();
+</script>
+
+<style>
+:root{
+  --board-dark:#9c7a3a;--bg:#1a1410;--panel:#221c14;
+  --gold:#d4a94a;--gold-l:#f0c96a;--text:#f0e6cc;--muted:#a08860;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:'Noto Serif TC',serif;min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;background-image:radial-gradient(ellipse at 20% 20%,rgba(180,140,60,.08) 0%,transparent 60%),radial-gradient(ellipse at 80% 80%,rgba(120,60,20,.1) 0%,transparent 60%)}
+h1{font-family:'Cinzel',serif;font-size:clamp(1.4rem,3vw,2rem);color:var(--gold);text-shadow:0 0 30px rgba(212,169,74,.4);letter-spacing:.3em;text-align:center;margin-bottom:.2rem}
+.sub{font-size:.75rem;color:var(--muted);letter-spacing:.2em;text-align:center;margin-bottom:1.2rem}
+
+/* ── LOBBY ── */
+#lobby{background:var(--panel);border:1px solid rgba(212,169,74,.2);border-radius:16px;padding:2rem;width:380px;max-width:95vw}
+.lobby-title{font-family:'Cinzel',serif;font-size:1rem;color:var(--gold);letter-spacing:.2em;margin-bottom:1rem;text-align:center}
+input[type=text]{width:100%;padding:.6rem .9rem;background:rgba(255,255,255,.05);border:1px solid rgba(212,169,74,.25);border-radius:6px;color:var(--text);font-family:'Noto Serif TC',serif;font-size:.85rem;outline:none;margin-bottom:.75rem}
+input[type=text]:focus{border-color:var(--gold)}
+input[type=text]::placeholder{color:var(--muted)}
+.btn-row{display:grid;grid-template-columns:1fr 1fr;gap:.5rem;margin-bottom:.75rem}
+.btn{padding:.6rem;background:transparent;border:1px solid rgba(212,169,74,.35);color:var(--gold);border-radius:6px;cursor:pointer;font-family:'Noto Serif TC',serif;font-size:.8rem;letter-spacing:.1em;transition:all .2s}
+.btn:hover{background:rgba(212,169,74,.12);border-color:var(--gold)}
+.btn-full{grid-column:1/-1}
+.lobby-msg{font-size:.8rem;text-align:center;min-height:1.2em;margin-bottom:.5rem}
+.divider{height:1px;background:rgba(212,169,74,.12);margin:.75rem 0}
+#invite-line{display:none;align-items:center;gap:.5rem;margin-bottom:.5rem}
+#room-code-display{font-family:'Cinzel',serif;font-size:1.3rem;color:var(--gold);letter-spacing:.3em;flex:1;text-align:center}
+#waiting-msg{display:none;text-align:center;font-size:.75rem;color:var(--muted);letter-spacing:.1em;animation:pulse 2s infinite}
+@keyframes pulse{0%,100%{opacity:.5}50%{opacity:1}}
+
+/* ── GAME ── */
+#game{display:none;align-items:flex-start;gap:1.2rem;flex-wrap:wrap;justify-content:center}
+.side{background:var(--panel);border:1px solid rgba(212,169,74,.2);border-radius:12px;padding:1.1rem;width:168px;display:flex;flex-direction:column;gap:.8rem}
+.sec-label{font-size:.62rem;color:var(--muted);letter-spacing:.15em;text-transform:uppercase}
+.player-card{background:rgba(255,255,255,.03);border-radius:8px;padding:.8rem;border:1.5px solid transparent;transition:border-color .3s,background .3s;position:relative;overflow:hidden}
+.player-card.active{border-color:var(--gold);background:rgba(212,169,74,.06)}
+.player-card.active::before{content:'';position:absolute;top:0;left:0;right:0;height:2px;background:linear-gradient(90deg,transparent,var(--gold),transparent);animation:shimmer 2s infinite}
+@keyframes shimmer{0%,100%{opacity:.4}50%{opacity:1}}
+.stone-dot{width:28px;height:28px;border-radius:50%;margin-bottom:.4rem}
+.stone-dot.black{background:radial-gradient(circle at 35% 35%,#555,#111);box-shadow:inset -2px -2px 5px rgba(0,0,0,.8)}
+.stone-dot.white{background:radial-gradient(circle at 35% 35%,#fff,#d8cfc0);box-shadow:inset -2px -2px 5px rgba(0,0,0,.2)}
+.pname{font-size:.82rem;color:var(--text);font-weight:700;letter-spacing:.05em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.plabel{font-size:.65rem;color:var(--muted);margin-top:1px}
+.turn-box{text-align:center;padding:.55rem;background:rgba(212,169,74,.08);border-radius:6px;border:1px solid rgba(212,169,74,.15)}
+.turn-text{font-size:.7rem;color:var(--muted)}
+.turn-name{font-size:.82rem;color:var(--gold);font-weight:700;margin-top:2px;min-height:1.1em}
+.my-badge{font-size:.68rem;color:rgba(212,169,74,.7);text-align:center;letter-spacing:.05em;padding:.3rem;border:1px dashed rgba(212,169,74,.2);border-radius:4px}
+.stat-grid{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.stat-cell{text-align:center;padding:.45rem;background:rgba(255,255,255,.03);border-radius:6px;border:1px solid rgba(212,169,74,.1)}
+.stat-num{font-family:'Cinzel',serif;font-size:1.2rem;color:var(--gold)}
+.stat-lbl{font-size:.6rem;color:var(--muted);margin-top:1px}
+.dv{height:1px;background:rgba(212,169,74,.12)}
+.btn-sm{width:100%;padding:.55rem;background:transparent;border:1px solid rgba(212,169,74,.35);color:var(--gold);border-radius:6px;cursor:pointer;font-family:'Noto Serif TC',serif;font-size:.75rem;letter-spacing:.1em;transition:all .2s}
+.btn-sm:hover{background:rgba(212,169,74,.12)}
+.btn-sm.red{border-color:rgba(192,57,43,.4);color:#e74c3c}
+.btn-sm.red:hover{background:rgba(192,57,43,.1)}
+
+/* ── CHAT ── */
+.chat-wrap{flex:1;display:flex;flex-direction:column;gap:4px}
+#chat-messages{flex:1;max-height:140px;overflow-y:auto;font-size:.68rem;line-height:1.7;scrollbar-width:thin;scrollbar-color:rgba(212,169,74,.3) transparent}
+.chat-empty{color:rgba(160,136,96,.45);font-size:.68rem}
+.chat-msg{margin-bottom:2px}
+.chat-who{color:var(--muted);margin-right:4px;font-size:.65rem}
+.chat-text{color:var(--text)}
+.chat-msg.mine .chat-who{color:var(--gold)}
+.chat-row{display:flex;gap:4px;margin-top:4px}
+.chat-row input{flex:1;padding:.35rem .6rem;background:rgba(255,255,255,.05);border:1px solid rgba(212,169,74,.2);border-radius:4px;color:var(--text);font-family:'Noto Serif TC',serif;font-size:.72rem;outline:none}
+.chat-row input:focus{border-color:rgba(212,169,74,.5)}
+.chat-row button{padding:.35rem .6rem;background:rgba(212,169,74,.15);border:1px solid rgba(212,169,74,.3);color:var(--gold);border-radius:4px;cursor:pointer;font-size:.72rem}
+
+/* ── BOARD WRAPPER ── */
+.board-wrap{position:relative}
+canvas#board{display:block;border-radius:4px;cursor:crosshair;box-shadow:0 0 0 6px var(--board-dark),0 0 0 10px rgba(212,169,74,.15),0 20px 60px rgba(0,0,0,.7)}
+
+/* ── WIN OVERLAY ── */
+.win-overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.65);border-radius:4px;opacity:0;pointer-events:none;transition:opacity .4s;backdrop-filter:blur(2px)}
+.win-overlay.visible{opacity:1;pointer-events:all}
+.win-box{background:var(--panel);border:1px solid var(--gold);border-radius:16px;padding:1.8rem 2.2rem;text-align:center;box-shadow:0 0 60px rgba(212,169,74,.25);animation:popIn .4s cubic-bezier(.34,1.56,.64,1) forwards}
+@keyframes popIn{from{transform:scale(.7);opacity:0}to{transform:scale(1);opacity:1}}
+.win-emoji{font-size:2.2rem;margin-bottom:.4rem}
+.win-title{font-family:'Cinzel',serif;font-size:1.4rem;color:var(--gold);letter-spacing:.2em;margin-bottom:.2rem}
+.win-sub{font-size:.8rem;color:var(--muted);margin-bottom:1rem}
+.win-btn{padding:.6rem 1.8rem;background:var(--gold);color:#1a1410;border:none;border-radius:6px;cursor:pointer;font-family:'Noto Serif TC',serif;font-size:.82rem;font-weight:700;letter-spacing:.15em;transition:all .2s;margin:.3rem}
+.win-btn:hover{background:var(--gold-l);transform:scale(1.03)}
+.win-btn.sec{background:transparent;border:1px solid rgba(212,169,74,.4);color:var(--gold)}
+footer{margin-top:.8rem;font-size:.65rem;color:var(--muted);letter-spacing:.1em;text-align:center}
+</style>
+</head>
+<body>
+
+<h1>五 子 棋</h1>
+<p class="sub">GOMOKU ONLINE · FIREBASE</p>
+
+<!-- ── LOBBY ── -->
+<div id="lobby">
+  <div class="lobby-title">加入或建立房間</div>
+  <input type="text" id="nick-input" placeholder="輸入你的暱稱" maxlength="12">
+
+  <div class="divider"></div>
+  <p class="sec-label" style="margin-bottom:.5rem">建立新房間</p>
+  <button class="btn btn-full" onclick="createRoom()">＋ 建立房間（黑方先手）</button>
+
+  <div id="invite-line">
+    <span style="font-size:.7rem;color:var(--muted)">房間號</span>
+    <span id="room-code-display"></span>
+    <button class="btn" style="padding:.3rem .7rem;font-size:.72rem" onclick="copyRoomCode()">複製</button>
+  </div>
+  <div id="waiting-msg">等待對手加入中…</div>
+
+  <div class="divider"></div>
+  <p class="sec-label" style="margin-bottom:.5rem">加入現有房間</p>
+  <input type="text" id="room-input" placeholder="輸入6位房間號" maxlength="6" style="text-transform:uppercase;letter-spacing:.2em">
+  <button class="btn btn-full" onclick="joinRoomById()">→ 加入房間（白方後手）</button>
+
+  <div id="lobby-msg" class="lobby-msg"></div>
+</div>
+
+<!-- ── GAME ── -->
+<div id="game">
+
+  <!-- Left -->
+  <div class="side">
+    <div class="sec-label">玩家</div>
+    <div class="player-card active" id="card-black">
+      <div class="stone-dot black"></div>
+      <div class="pname" id="name-black">黑方</div>
+      <div class="plabel">先手 · BLACK</div>
+    </div>
+    <div class="player-card" id="card-white">
+      <div class="stone-dot white"></div>
+      <div class="pname" id="name-white">等待加入…</div>
+      <div class="plabel">後手 · WHITE</div>
+    </div>
+    <div class="my-badge" id="my-color-badge">—</div>
+    <div class="dv"></div>
+    <div class="turn-box">
+      <div class="turn-text">目前</div>
+      <div class="turn-name" id="turn-display">等待對手</div>
+    </div>
+    <div class="stat-grid">
+      <div class="stat-cell">
+        <div class="stat-num" id="stat-moves">0</div>
+        <div class="stat-lbl">手數</div>
+      </div>
+      <div class="stat-cell">
+        <div class="stat-num" id="stat-room">—</div>
+        <div class="stat-lbl">房間</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Board -->
+  <div class="board-wrap">
+    <canvas id="board" width="540" height="540"></canvas>
+    <div class="win-overlay" id="win-overlay">
+      <div class="win-box">
+        <div class="win-emoji" id="win-emoji">🎉</div>
+        <div class="win-title" id="win-title">勝利！</div>
+        <div class="win-sub" id="win-sub"></div>
+        <button class="win-btn" onclick="resetGame()">再來一局</button>
+        <button class="win-btn sec" onclick="leaveRoom()">離開房間</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Right -->
+  <div class="side">
+    <div class="sec-label">聊天室</div>
+    <div class="chat-wrap">
+      <div id="chat-messages"><div class="chat-empty">說點什麼吧…</div></div>
+      <div class="chat-row">
+        <input type="text" id="chat-input" placeholder="說點什麼…" maxlength="60">
+        <button onclick="sendChat()">送出</button>
+      </div>
+    </div>
+    <div class="dv"></div>
+    <div class="sec-label">規則</div>
+    <div style="font-size:.65rem;color:var(--muted);line-height:1.9;letter-spacing:.04em">
+      • 15×15 標準棋盤<br>
+      • 黑方先行<br>
+      • 五子連線獲勝<br>
+      • 橫縱斜均計，長連亦算
+    </div>
+    <div class="dv"></div>
+    <button class="btn-sm red" onclick="leaveRoom()">✕ 離開房間</button>
+  </div>
+
+</div>
+
+<footer>五子棋 Online · Firebase Realtime Database</footer>
+
+<script>
+// Show room number in stat once in game
+const _orig = window.joinRoom;
+document.addEventListener('DOMContentLoaded', ()=>{
+  const statRoom = document.getElementById('stat-room');
+  const orig = setInterval(()=>{
+    if(window.roomId){ statRoom.textContent = window.roomId; clearInterval(orig); }
+  }, 300);
+});
+</script>
+</body>
+</html>
