@@ -11,6 +11,25 @@
 let gameType = 'gomoku';
 let xqVariant = 'standard'; // for xiangqi: 'standard'(大盤) | 'banqi'(暗棋)
 
+function loadSavedSettings(type) {
+  try { return JSON.parse(localStorage.getItem('cs_settings_'+type)||'null'); } catch(e) { return null; }
+}
+function saveSettingsForType(type, obj) {
+  try { localStorage.setItem('cs_settings_'+type, JSON.stringify(obj)); } catch(e) {}
+}
+function applySavedSettingsToForm() {
+  const saved = loadSavedSettings(gameType);
+  const sizeSel=document.getElementById('opt-size');
+  if (saved && saved.boardSize!=null && [...sizeSel.options].some(o=>o.value===String(saved.boardSize))) {
+    sizeSel.value=String(saved.boardSize);
+  }
+  document.getElementById('opt-wins').value = saved?.winCount ?? 3;
+  setTimeLimitForm('opt', saved?.timeLimit||0);
+  document.getElementById('opt-first').value = saved?.firstPlayerPref || 'random';
+  document.getElementById('opt-forbidden').checked = !!saved?.forbiddenBlack;
+  document.getElementById('opt-show-hints').checked = saved?.showHints !== false;
+}
+
 window.selectGame = function(type, el) {
   gameType = type;
   document.querySelectorAll('.game-pill').forEach(p=>{ if(!p.classList.contains('xq-variant-pill')) p.classList.remove('active'); });
@@ -18,6 +37,7 @@ window.selectGame = function(type, el) {
   document.getElementById('gomoku-only-opts').style.display = type==='gomoku' ? '' : 'none';
   document.getElementById('xq-variant-pills').style.display = type==='xiangqi' ? '' : 'none';
   document.getElementById('board-size-field').style.display = (type==='xiangqi'||type==='connect4') ? 'none' : '';
+  document.getElementById('show-hints-row').style.display = (type==='othello'||type==='xiangqi') ? '' : 'none';
   const sizeEl = document.getElementById('opt-size');
   if (type==='othello') {
     sizeEl.innerHTML = '<option value="8" selected>8x8（標準）</option><option value="6">6x6（小）</option>';
@@ -33,6 +53,8 @@ window.selectXqVariant = function(v, el) {
 };
 
 window.goToRoomStep = function() {
+  const nick = document.getElementById('nick-input').value.trim();
+  if (!nick) { lobbyMsgEl('lobby-msg-join','請先輸入暱稱',true); return; }
   document.getElementById('step-select-game').style.display = 'none';
   document.getElementById('step-room').style.display = '';
   document.getElementById('selected-game-badge').textContent =
@@ -40,7 +62,9 @@ window.goToRoomStep = function() {
     gameType==='xiangqi' ? (xqVariant==='banqi' ? '🀫 暗棋 Banqi' : '🐎 象棋 Xiangqi') :
     gameType==='connect4' ? '🔵 四子棋 Connect Four' :
     '⚫ 五子棋 Gomoku';
+  applySavedSettingsToForm();
 };
+function lobbyMsgEl(id,m,err){ const el=document.getElementById(id); if(el){ el.textContent=m; el.style.color=err?'#e74c3c':'#27ae60'; } }
 
 window.backToGameStep = function() {
   document.getElementById('step-room').style.display = 'none';
@@ -131,8 +155,36 @@ let BSIZE=15, CSIZE=540, PAD=30, STEP=36;
 // Xiangqi/Banqi selection state (client-local only)
 let xqSelR=-1, xqSelC=-1, xqSelMoves=[];
 
+// Othello flip animation state
+let flipAnims = [];
+
 const canvas = document.getElementById('board');
 const ctx    = canvas.getContext('2d');
+
+// ─── High-DPI canvas + animation state ───
+const DPR = window.devicePixelRatio || 1;
+let logicalW = 540, logicalH = 540;
+let lastMoveTs = 0;
+let animHandle = null;
+
+function setCanvasSize(w, h) {
+  logicalW = w; logicalH = h;
+  canvas.width  = Math.round(w * DPR);
+  canvas.height = Math.round(h * DPR);
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+}
+
+function startRenderLoop() {
+  if (animHandle) return;
+  const tick = () => {
+    render();
+    animHandle = (!gameOver) ? requestAnimationFrame(tick) : null;
+  };
+  animHandle = requestAnimationFrame(tick);
+}
+function stopRenderLoop() {
+  if (animHandle) { cancelAnimationFrame(animHandle); animHandle = null; }
+}
 
 // ══════════════════════════════════
 //  LOBBY
@@ -147,14 +199,18 @@ window.createRoom = async function() {
   let winCount       = parseInt(document.getElementById('opt-wins').value) || 3;
   let timeLimit      = getTimeLimitFromForm('opt');
   const forbiddenBlack = gameType==='gomoku' && document.getElementById('opt-forbidden').checked;
-  let firstPlayer    = document.getElementById('opt-first').value;
+  const showHints    = document.getElementById('opt-show-hints').checked;
+  const firstPlayerPref = document.getElementById('opt-first').value;
+  let firstPlayer    = firstPlayerPref;
   if (firstPlayer === 'random') firstPlayer = Math.random()<.5 ? 'black' : 'white';
 
   if (winCount < 1) { lobbyMsg('勝利局數須≥1', true); return; }
 
-  const settings = { gameType, winCount, timeLimit, forbiddenBlack, firstPlayer };
+  const settings = { gameType, winCount, timeLimit, forbiddenBlack, firstPlayer, showHints };
   if (gameType==='xiangqi') settings.xqVariant = xqVariant;
   else if (gameType!=='connect4') settings.boardSize = boardSize;
+
+  saveSettingsForType(gameType, { boardSize, winCount, timeLimit, forbiddenBlack, showHints, firstPlayerPref });
 
   const id = Math.random().toString(36).slice(2,8).toUpperCase();
   const initBoard = gameType==='othello' ? makeOthelloInitBoard(boardSize)
@@ -191,13 +247,13 @@ window.copyWaitRoomCode = function() {
 window.joinRoomById = async function() {
   const nick = document.getElementById('nick-input').value.trim();
   const id   = document.getElementById('room-input').value.trim().toUpperCase();
-  if (!nick) { lobbyMsg('請輸入暱稱', true); return; }
-  if (!id)   { lobbyMsg('請輸入房間號', true); return; }
+  if (!nick) { lobbyMsg('請輸入暱稱', true, 'lobby-msg-join'); return; }
+  if (!id)   { lobbyMsg('請輸入房間號', true, 'lobby-msg-join'); return; }
   nickname = filterProfanity(nick);
   const snap = await get(ref(db, `rooms/${id}`));
-  if (!snap.exists()) { lobbyMsg('房間不存在', true); return; }
+  if (!snap.exists()) { lobbyMsg('房間不存在', true, 'lobby-msg-join'); return; }
   const d = snap.val();
-  if (d.status !== 'waiting') { lobbyMsg('房間已滿或已開始', true); return; }
+  if (d.status !== 'waiting') { lobbyMsg('房間已滿或已開始', true, 'lobby-msg-join'); return; }
   const joinColor = d.hostColor==='black' ? 'white' : 'black';
   const upd = { status:'ready' };
   upd[joinColor] = { name:nick, connected:true };
@@ -206,7 +262,7 @@ window.joinRoomById = async function() {
   joinRoom(id);
 };
 
-function lobbyMsg(m,err=false){ const el=document.getElementById('lobby-msg'); el.textContent=m; el.style.color=err?'#e74c3c':'#27ae60'; }
+function lobbyMsg(m,err=false,target='lobby-msg'){ const el=document.getElementById(target); el.textContent=m; el.style.color=err?'#e74c3c':'#27ae60'; }
 function isHost(d){ return !!d && d.hostColor===myColor; }
 
 // ══════════════════════════════════
@@ -267,6 +323,7 @@ async function handleOpponentLeft(d, oppColor) {
 
 function resetToLobby() {
   clearInterval(timerInterval);
+  stopRenderLoop();
   roomId=null; myColor=null; oppConnPrev=null;
   document.getElementById('step-waiting').style.display='none';
   document.getElementById('step-room').style.display='none';
@@ -327,10 +384,12 @@ function fillRoomRulesForm(s, amHost) {
   document.getElementById('room-opt-first').value = s.firstPlayer==='white'?'white':s.firstPlayer==='random'?'random':'black';
   document.getElementById('room-opt-forbidden').checked = !!s.forbiddenBlack;
   document.getElementById('room-opt-forbidden-row').style.display = s.gameType==='gomoku' ? '' : 'none';
+  document.getElementById('room-opt-show-hints').checked = s.showHints !== false;
+  document.getElementById('room-opt-show-hints-row').style.display = (s.gameType==='othello'||s.gameType==='xiangqi') ? '' : 'none';
 
   [document.getElementById('room-opt-wins'), document.getElementById('room-opt-time-mode'),
    document.getElementById('room-opt-time-custom'), document.getElementById('room-opt-first'),
-   document.getElementById('room-opt-forbidden')]
+   document.getElementById('room-opt-forbidden'), document.getElementById('room-opt-show-hints')]
    .forEach(el=>el.disabled = !amHost);
 }
 
@@ -347,8 +406,9 @@ window.saveRoomRules = async function() {
   const timeLimit  = getTimeLimitFromForm('room-opt');
   const firstPlayer= document.getElementById('room-opt-first').value;
   const forbiddenBlack = d.settings.gameType==='gomoku' && document.getElementById('room-opt-forbidden').checked;
+  const showHints = (d.settings.gameType==='othello'||d.settings.gameType==='xiangqi') ? document.getElementById('room-opt-show-hints').checked : (d.settings.showHints!==false);
   if (winCount<1)  { roomRulesMsg('勝利局數須≥1', true); return; }
-  const newSettings={...d.settings,winCount,timeLimit,firstPlayer,forbiddenBlack};
+  const newSettings={...d.settings,winCount,timeLimit,firstPlayer,forbiddenBlack,showHints};
   if (d.settings.gameType!=='xiangqi' && d.settings.gameType!=='connect4') newSettings.boardSize = parseInt(document.getElementById('room-opt-size').value);
   await update(roomRef,{settings:newSettings});
   roomRulesMsg('規則已更新！');
@@ -391,6 +451,8 @@ window.leaveWaitingRoom = async function() {
 
 function syncState(d) {
   const s = d.settings||{};
+  const prevGameType = gameType;
+  const prevBoard = localBoard;
   gameType = s.gameType||'gomoku';
   xqVariant = s.xqVariant||'standard';
   BSIZE    = s.boardSize||(gameType==='othello'?8:15);
@@ -399,19 +461,22 @@ function syncState(d) {
 
   if (gameType==='othello') {
     CSIZE=OCSIZE; PAD=OPAD; STEP=OSTEP;
-    canvas.width=canvas.height=OCSIZE;
+    setCanvasSize(OCSIZE,OCSIZE);
+    canvas.className='othello';
     document.getElementById('game-type-badge').textContent='黑白棋 · OTHELLO';
   } else if (gameType==='xiangqi') {
-    if (xqVariant==='banqi') { canvas.width=BQ_W; canvas.height=BQ_H; }
-    else { canvas.width=XQ_W; canvas.height=XQ_H; }
+    if (xqVariant==='banqi') { setCanvasSize(BQ_W,BQ_H); canvas.className='banqi'; }
+    else { setCanvasSize(XQ_W,XQ_H); canvas.className='xiangqi'; }
     document.getElementById('game-type-badge').textContent = xqVariant==='banqi' ? '暗棋 · BANQI' : '象棋 · XIANGQI';
   } else if (gameType==='connect4') {
-    canvas.width=C4_W; canvas.height=C4_H;
+    setCanvasSize(C4_W,C4_H);
+    canvas.className='connect4';
     document.getElementById('game-type-badge').textContent='四子棋 · CONNECT FOUR';
   } else {
     CSIZE=GCSIZE; PAD=GPAD;
     STEP=(GCSIZE-GPAD*2)/(BSIZE-1);
-    canvas.width=canvas.height=GCSIZE;
+    setCanvasSize(GCSIZE,GCSIZE);
+    canvas.className='gomoku';
     document.getElementById('game-type-badge').textContent='五子棋 · GOMOKU';
   }
 
@@ -421,11 +486,20 @@ function syncState(d) {
     localBoard = flat;
   } else if (gameType==='othello') {
     for(let r=0;r<BSIZE;r++){localBoard.push([]);for(let c=0;c<BSIZE;c++)localBoard[r].push(flat[r*BSIZE+c]||0);}
+    if (prevGameType==='othello' && prevBoard.length===BSIZE) {
+      const now=performance.now();
+      for(let r=0;r<BSIZE;r++) for(let c=0;c<BSIZE;c++){
+        const pv=prevBoard[r]?.[c]||0, nv=localBoard[r][c];
+        if (pv!==0 && nv!==0 && pv!==nv) flipAnims.push({row:r,col:c,from:pv,to:nv,start:now});
+      }
+    }
   } else {
     for(let r=0;r<BSIZE;r++){localBoard.push([]);for(let c=0;c<BSIZE;c++)localBoard[r].push(flat[r*BSIZE+c]||0);}
   }
 
+  const prevMoveCount=moveCount;
   moveCount=d.moveCount||0; lastMove=d.lastMove||null;
+  if (moveCount!==prevMoveCount) lastMoveTs = performance.now();
   winLine=d.winLine||[]; gameOver=d.status==='over';
   scores=d.scores||{black:0,white:0};
 
@@ -433,7 +507,8 @@ function syncState(d) {
   updateUI(d);
   render();
   updateRulesDisplay(s);
-  if (gameOver) setTimeout(()=>showWin(d),400);
+  if (gameOver) { stopRenderLoop(); setTimeout(()=>showWin(d),400); }
+  else startRenderLoop();
 
   clearInterval(timerInterval);
   if (!gameOver && s.timeLimit>0) {
@@ -451,7 +526,7 @@ function syncState(d) {
 canvas.addEventListener('click', async e => {
   if (gameOver) return;
   const rect=canvas.getBoundingClientRect();
-  const sx=canvas.width/rect.width, sy=canvas.height/rect.height;
+  const sx=logicalW/rect.width, sy=logicalH/rect.height;
   const mx=(e.clientX-rect.left)*sx, my=(e.clientY-rect.top)*sy;
 
   if (gameType==='xiangqi') {
@@ -483,7 +558,7 @@ canvas.addEventListener('click', async e => {
 canvas.addEventListener('mousemove', e => {
   if (gameOver || gameType==='xiangqi') return;
   const rect=canvas.getBoundingClientRect();
-  const sx=canvas.width/rect.width, sy=canvas.height/rect.height;
+  const sx=logicalW/rect.width, sy=logicalH/rect.height;
   const mx=(e.clientX-rect.left)*sx, my=(e.clientY-rect.top)*sy;
   const player=myColor==='black'?1:2;
   render();
@@ -496,6 +571,8 @@ canvas.addEventListener('mousemove', e => {
   } else if (gameType==='connect4') {
     const col=Math.floor((mx-C4_PAD)/C4_STEPX);
     if (col>=0&&col<C4_COLS) {
+      ctx.fillStyle='rgba(255,255,255,0.06)';
+      ctx.fillRect(C4_PAD+col*C4_STEPX,0,C4_STEPX,C4_H);
       const row=c4LowestEmptyRow(localBoard,col);
       if (row>=0) drawC4Piece(col,row,player,true);
     }
@@ -511,7 +588,7 @@ canvas.addEventListener('mouseleave', render);
 //  GOMOKU LOGIC
 // ══════════════════════════════════
 async function doGomokuMove(d, row, col) {
-  if (d.board[row*BSIZE+col]!==0) return;
+  if (d.board[row*BSIZE+col]!==0) { showFlash('此處已有棋子'); return; }
   const player=myColor==='black'?1:2;
 
   if (d.settings?.forbiddenBlack && myColor==='black') {
@@ -607,7 +684,7 @@ function hasAnyMove(flat, player, size) {
 async function doOthelloMove(d, row, col) {
   const player=myColor==='black'?1:2;
   const flips=getOthelloFlipsFlat(d.board,row,col,player,BSIZE);
-  if(flips.length===0) return;
+  if(flips.length===0) { showFlash('不能下在這裡'); return; }
 
   const newFlat=[...d.board];
   newFlat[row*BSIZE+col]=player;
@@ -775,6 +852,7 @@ async function handleStandardXqClick(d,row,col){
     if(!legal){
       const p=flat[row*XQ_COLS+col];
       if(p && p[0]===myXq){ xqSelR=row; xqSelC=col; xqSelMoves=xqLegalMoves(flat,row,col); render(); }
+      else showFlash('不能下在這裡');
       return;
     }
     const fromIdx=xqSelR*XQ_COLS+xqSelC, toIdx=row*XQ_COLS+col;
@@ -865,6 +943,7 @@ async function handleBanqiClick(d,row,col){
     const legal=xqSelMoves.some(([mr,mc])=>mr===row&&mc===col);
     if(!legal){
       if(cell && !cell.startsWith('?') && cell[0]===myBq){ xqSelR=row;xqSelC=col;xqSelMoves=banqiLegalMoves(flat,row,col,myBq); render(); }
+      else showFlash('不能下在這裡');
       return;
     }
     const fromIdx=xqSelR*BQ_COLS+xqSelC;
@@ -1090,7 +1169,7 @@ function showFlash(msg){
 //  CANVAS DRAWING
 // ══════════════════════════════════
 function render() {
-  ctx.clearRect(0,0,canvas.width,canvas.height);
+  ctx.clearRect(0,0,logicalW,logicalH);
   if(gameType==='othello') renderOthello();
   else if(gameType==='xiangqi') renderXiangqi();
   else if(gameType==='connect4') renderConnect4();
@@ -1128,20 +1207,32 @@ function drawGomokuBoard(){
     const[x]=gxy(i,0);ctx.fillText(COLS[i],x,PAD-13);ctx.fillText(COLS[i],x,CSIZE-PAD+13);
     const[,y]=gxy(0,i);ctx.textAlign='right';ctx.fillText(BSIZE-i,PAD-9,y);ctx.textAlign='left';ctx.fillText(BSIZE-i,CSIZE-PAD+9,y);ctx.textAlign='center';
   }
+  drawVignette(CSIZE,CSIZE);
+}
+
+function moveAge(){ return Math.min(1, (performance.now()-lastMoveTs)/600); }
+function pulseAlpha(){ return 0.55+0.25*Math.sin(performance.now()/420); }
+function drawVignette(w,h){
+  const vg=ctx.createRadialGradient(w/2,h/2,Math.min(w,h)*0.32,w/2,h/2,Math.max(w,h)*0.72);
+  vg.addColorStop(0,'rgba(0,0,0,0)'); vg.addColorStop(1,'rgba(0,0,0,0.2)');
+  ctx.fillStyle=vg; ctx.fillRect(0,0,w,h);
 }
 
 function drawGomokuStone(col,row,player,ghost=false){
   const[x,y]=gxy(col,row),r=STEP*.44;
   ctx.save();if(ghost)ctx.globalAlpha=.35;
+  if(!ghost){ ctx.shadowColor='rgba(0,0,0,0.45)'; ctx.shadowBlur=6; ctx.shadowOffsetY=3; }
   if(player===1){
     const g=ctx.createRadialGradient(x-r*.3,y-r*.3,r*.05,x,y,r);
     g.addColorStop(0,'#888');g.addColorStop(.3,'#333');g.addColorStop(1,'#0a0a0a');
     ctx.fillStyle=g;ctx.beginPath();ctx.arc(x,y,r,0,Math.PI*2);ctx.fill();
+    ctx.shadowBlur=0; ctx.shadowOffsetY=0;
     ctx.fillStyle='rgba(255,255,255,0.18)';ctx.beginPath();ctx.ellipse(x-r*.25,y-r*.28,r*.28,r*.18,-Math.PI/5,0,Math.PI*2);ctx.fill();
   }else{
     const g=ctx.createRadialGradient(x-r*.3,y-r*.3,r*.05,x,y,r);
     g.addColorStop(0,'#fff');g.addColorStop(.5,'#e8e0d0');g.addColorStop(1,'#c0b89a');
     ctx.fillStyle=g;ctx.beginPath();ctx.arc(x,y,r,0,Math.PI*2);ctx.fill();
+    ctx.shadowBlur=0; ctx.shadowOffsetY=0;
     ctx.strokeStyle='rgba(150,130,90,0.4)';ctx.lineWidth=.5;ctx.stroke();
     ctx.fillStyle='rgba(255,255,255,0.55)';ctx.beginPath();ctx.ellipse(x-r*.25,y-r*.28,r*.26,r*.16,-Math.PI/5,0,Math.PI*2);ctx.fill();
   }
@@ -1149,8 +1240,11 @@ function drawGomokuStone(col,row,player,ghost=false){
 }
 function drawGomokuLastMark(col,row,player){
   const[x,y]=gxy(col,row);
+  const age=moveAge(), r=5+(1-age)*4;
+  ctx.save(); ctx.globalAlpha=0.4+0.6*(1-age);
   ctx.strokeStyle=player===1?'rgba(255,220,80,0.9)':'rgba(180,80,40,0.8)';
-  ctx.lineWidth=1.5;ctx.beginPath();ctx.arc(x,y,5,0,Math.PI*2);ctx.stroke();
+  ctx.lineWidth=1.5;ctx.beginPath();ctx.arc(x,y,r,0,Math.PI*2);ctx.stroke();
+  ctx.restore();
 }
 function drawWinLine(line){
   if(!line||line.length<2)return;
@@ -1165,17 +1259,32 @@ function oxy(c,r){return[PAD+c*OSTEP,PAD+r*OSTEP];}
 
 function renderOthello(){
   drawOthelloBoard();
+  const now=performance.now();
+  flipAnims = flipAnims.filter(a=>now-a.start<360);
   // Draw hints for current player
   const player=myColor==='black'?1:2;
   for(let r=0;r<BSIZE;r++) for(let c=0;c<BSIZE;c++){
     if(localBoard[r][c]===0){
       const flips=getOthelloFlips(localBoard,r,c,player,BSIZE);
-      if(flips.length>0&&!gameOver) drawOthelloHint(c,r);
+      if(flips.length>0&&!gameOver&&roomSettings.showHints!==false) drawOthelloHint(c,r);
     } else {
-      drawOthelloStone(c,r,localBoard[r][c]);
+      const anim=flipAnims.find(a=>a.row===r&&a.col===c);
+      if(anim) drawOthelloFlipping(c,r,anim,now);
+      else drawOthelloStone(c,r,localBoard[r][c]);
     }
   }
   if(lastMove) drawOthelloLastMark(lastMove.col,lastMove.row);
+}
+
+function drawOthelloFlipping(col,row,anim,now){
+  const t=Math.min(1,(now-anim.start)/360);
+  const [x,y]=oxy(col,row);
+  const scaleX=Math.max(Math.abs(Math.cos(t*Math.PI)),0.05);
+  const showPlayer = t<0.5 ? anim.from : anim.to;
+  ctx.save();
+  ctx.translate(x,y); ctx.scale(scaleX,1); ctx.translate(-x,-y);
+  drawOthelloStone(col,row,showPlayer);
+  ctx.restore();
 }
 
 function drawOthelloBoard(){
@@ -1204,20 +1313,24 @@ function drawOthelloBoard(){
   [[2,2],[2,BSIZE-3],[BSIZE-3,2],[BSIZE-3,BSIZE-3]].forEach(([r,c])=>{
     const[x,y]=oxy(c,r);ctx.fillStyle='rgba(0,60,15,0.7)';ctx.beginPath();ctx.arc(x,y,4,0,Math.PI*2);ctx.fill();
   });
+  drawVignette(OCSIZE,OCSIZE);
 }
 
 function drawOthelloStone(col,row,player){
   const[x,y]=oxy(col,row),r=OSTEP*.42;
   ctx.save();
+  ctx.shadowColor='rgba(0,0,0,0.5)'; ctx.shadowBlur=7; ctx.shadowOffsetY=3;
   if(player===1){
     const g=ctx.createRadialGradient(x-r*.3,y-r*.3,r*.05,x,y,r);
     g.addColorStop(0,'#888');g.addColorStop(.35,'#222');g.addColorStop(1,'#050505');
     ctx.fillStyle=g;ctx.beginPath();ctx.arc(x,y,r,0,Math.PI*2);ctx.fill();
+    ctx.shadowBlur=0; ctx.shadowOffsetY=0;
     ctx.fillStyle='rgba(255,255,255,0.2)';ctx.beginPath();ctx.ellipse(x-r*.28,y-r*.3,r*.3,r*.18,-Math.PI/5,0,Math.PI*2);ctx.fill();
   }else{
     const g=ctx.createRadialGradient(x-r*.3,y-r*.3,r*.05,x,y,r);
     g.addColorStop(0,'#fff');g.addColorStop(.45,'#eee');g.addColorStop(1,'#ccc');
     ctx.fillStyle=g;ctx.beginPath();ctx.arc(x,y,r,0,Math.PI*2);ctx.fill();
+    ctx.shadowBlur=0; ctx.shadowOffsetY=0;
     ctx.strokeStyle='rgba(160,160,150,0.5)';ctx.lineWidth=.5;ctx.stroke();
     ctx.fillStyle='rgba(255,255,255,0.6)';ctx.beginPath();ctx.ellipse(x-r*.28,y-r*.3,r*.28,r*.16,-Math.PI/5,0,Math.PI*2);ctx.fill();
   }
@@ -1226,9 +1339,10 @@ function drawOthelloStone(col,row,player){
 
 function drawOthelloHint(col,row){
   const[x,y]=oxy(col,row);
-  ctx.fillStyle='rgba(255,230,80,0.3)';
+  const a=pulseAlpha();
+  ctx.fillStyle=`rgba(255,230,80,${0.22+0.18*a})`;
   ctx.beginPath();ctx.arc(x,y,OSTEP*.2,0,Math.PI*2);ctx.fill();
-  ctx.strokeStyle='rgba(255,230,80,0.6)';ctx.lineWidth=1.5;ctx.stroke();
+  ctx.strokeStyle=`rgba(255,230,80,${0.4+0.3*a})`;ctx.lineWidth=1.5;ctx.stroke();
 }
 
 function drawOthelloGhost(col,row,player){
@@ -1241,8 +1355,11 @@ function drawOthelloGhost(col,row,player){
 
 function drawOthelloLastMark(col,row){
   const[x,y]=oxy(col,row);
+  const age=moveAge();
+  ctx.save(); ctx.globalAlpha=0.5+0.5*(1-age);
   ctx.strokeStyle='rgba(255,100,50,0.9)';ctx.lineWidth=2;
-  ctx.beginPath();ctx.arc(x,y,OSTEP*.42,0,Math.PI*2);ctx.stroke();
+  ctx.beginPath();ctx.arc(x,y,OSTEP*(.42+(1-age)*.12),0,Math.PI*2);ctx.stroke();
+  ctx.restore();
 }
 
 /* ─── CONNECT FOUR (四子棋) RENDER ─── */
@@ -1255,11 +1372,15 @@ function drawC4Board(){
     ctx.beginPath(); ctx.arc(x,y,Math.min(C4_STEPX,C4_STEPY)*0.4,0,Math.PI*2);
     ctx.fillStyle='#0d3a6e'; ctx.fill();
   }
+  ctx.fillStyle='rgba(255,255,255,0.5)'; ctx.font='11px Noto Serif TC'; ctx.textAlign='center'; ctx.textBaseline='middle';
+  for(let c=0;c<C4_COLS;c++){ const[x]=c4XY(c,0); ctx.fillText(String(c+1), x, 10); }
+  drawVignette(C4_W,C4_H);
 }
 
 function drawC4Piece(col,row,player,ghost=false){
   const [x,y]=c4XY(col,row), r=Math.min(C4_STEPX,C4_STEPY)*0.38;
   ctx.save(); if(ghost) ctx.globalAlpha=.4;
+  if(!ghost){ ctx.shadowColor='rgba(0,0,0,0.5)'; ctx.shadowBlur=7; ctx.shadowOffsetY=3; }
   ctx.beginPath();ctx.arc(x,y,r,0,Math.PI*2);
   const g=ctx.createRadialGradient(x-r*.3,y-r*.3,r*.1,x,y,r);
   if(player===1){ g.addColorStop(0,'#ff6b5b');g.addColorStop(1,'#c0392b'); }
@@ -1269,9 +1390,12 @@ function drawC4Piece(col,row,player,ghost=false){
 }
 
 function drawC4LastMark(col,row){
-  const [x,y]=c4XY(col,row), r=Math.min(C4_STEPX,C4_STEPY)*0.42;
+  const [x,y]=c4XY(col,row);
+  const age=moveAge(), r=Math.min(C4_STEPX,C4_STEPY)*(.42+(1-age)*.12);
+  ctx.save(); ctx.globalAlpha=0.5+0.5*(1-age);
   ctx.strokeStyle='rgba(255,255,255,0.8)';ctx.lineWidth=2;
   ctx.beginPath();ctx.arc(x,y,r,0,Math.PI*2);ctx.stroke();
+  ctx.restore();
 }
 
 function drawC4WinLine(line){
@@ -1322,15 +1446,24 @@ function drawXqBoard(){
   const midY=(xqXY(0,4)[1]+xqXY(0,5)[1])/2;
   ctx.fillText('楚 河', XQ_W*0.28, midY);
   ctx.fillText('漢 界', XQ_W*0.72, midY);
+  ctx.fillStyle='rgba(100,68,20,0.5)'; ctx.font='11px Noto Serif TC';
+  for(let c=0;c<XQ_COLS;c++){
+    const[x]=xqXY(c,0);
+    ctx.fillText(String(c+1), x, XQ_PAD-15);
+    ctx.fillText(String(c+1), x, XQ_H-XQ_PAD+15);
+  }
+  drawVignette(XQ_W,XQ_H);
 }
 
 function drawXqPiece(r,c,p){
   const [x,y]=xqXY(c,r), rad=Math.min(XQ_STEPX,XQ_STEPY)*0.42;
   const color=p[0], type=p[1];
   ctx.save();
+  ctx.shadowColor='rgba(0,0,0,0.5)'; ctx.shadowBlur=6; ctx.shadowOffsetY=3;
   ctx.beginPath();ctx.arc(x,y,rad,0,Math.PI*2);
   ctx.fillStyle = color==='r' ? '#f4e4c1' : '#e8e0cc';
   ctx.fill();
+  ctx.shadowBlur=0; ctx.shadowOffsetY=0;
   ctx.lineWidth=2; ctx.strokeStyle = color==='r' ? '#b3392c' : '#2a2a2a';
   ctx.stroke();
   ctx.fillStyle = color==='r' ? '#b3392c' : '#2a2a2a';
@@ -1348,19 +1481,23 @@ function renderXiangqiStandard(){
   }
   if(xqSelR>=0){
     const [x,y]=xqXY(xqSelC,xqSelR);
-    ctx.strokeStyle='rgba(255,210,60,0.95)';ctx.lineWidth=3;
+    const a=pulseAlpha();
+    ctx.strokeStyle=`rgba(255,210,60,${0.7+0.3*a})`;ctx.lineWidth=3;
     ctx.beginPath();ctx.arc(x,y,Math.min(XQ_STEPX,XQ_STEPY)*0.46,0,Math.PI*2);ctx.stroke();
   }
-  xqSelMoves.forEach(([r,c])=>{
+  if (roomSettings.showHints!==false) xqSelMoves.forEach(([r,c])=>{
     const [x,y]=xqXY(c,r);
-    ctx.fillStyle='rgba(80,200,100,0.55)';
-    ctx.beginPath();ctx.arc(x,y,6,0,Math.PI*2);ctx.fill();
+    const a=pulseAlpha();
+    ctx.fillStyle=`rgba(80,200,100,${0.4+0.3*a})`;
+    ctx.beginPath();ctx.arc(x,y,5+2*a,0,Math.PI*2);ctx.fill();
   });
   if(lastMove){
     const [x,y]=xqXY(lastMove.col,lastMove.row);
-    const s=Math.min(XQ_STEPX,XQ_STEPY)*0.5;
+    const age=moveAge(), s=Math.min(XQ_STEPX,XQ_STEPY)*(0.5+(1-age)*.15);
+    ctx.save(); ctx.globalAlpha=0.5+0.5*(1-age);
     ctx.strokeStyle='rgba(255,120,40,0.9)';ctx.lineWidth=2;
     ctx.strokeRect(x-s,y-s,s*2,s*2);
+    ctx.restore();
   }
 }
 
@@ -1373,16 +1510,19 @@ function drawBqBoard(){
   for(let r=0;r<BQ_ROWS;r++) for(let c=0;c<BQ_COLS;c++) ctx.strokeRect(BQ_PAD+c*BQ_STEPX, BQ_PAD+r*BQ_STEPY, BQ_STEPX, BQ_STEPY);
   ctx.strokeStyle='rgba(0,40,10,0.85)';ctx.lineWidth=2;
   ctx.strokeRect(BQ_PAD,BQ_PAD,BQ_STEPX*BQ_COLS,BQ_STEPY*BQ_ROWS);
+  drawVignette(BQ_W,BQ_H);
 }
 
 function drawBqPiece(r,c,cell){
   const [x,y]=bqXY(c,r), rad=Math.min(BQ_STEPX,BQ_STEPY)*0.4;
   ctx.save();
+  ctx.shadowColor='rgba(0,0,0,0.5)'; ctx.shadowBlur=6; ctx.shadowOffsetY=3;
   if(cell.startsWith('?')){
     ctx.beginPath();ctx.arc(x,y,rad,0,Math.PI*2);
     const g=ctx.createRadialGradient(x-rad*.3,y-rad*.3,rad*.1,x,y,rad);
     g.addColorStop(0,'#5a4a30');g.addColorStop(1,'#2c2010');
     ctx.fillStyle=g;ctx.fill();
+    ctx.shadowBlur=0; ctx.shadowOffsetY=0;
     ctx.strokeStyle='rgba(212,169,74,0.5)';ctx.lineWidth=2;ctx.stroke();
     ctx.fillStyle='rgba(212,169,74,0.85)';ctx.font=`bold ${Math.floor(rad*1.1)}px Noto Serif TC`;
     ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText('棋',x,y+1);
@@ -1391,6 +1531,7 @@ function drawBqPiece(r,c,cell){
     ctx.beginPath();ctx.arc(x,y,rad,0,Math.PI*2);
     ctx.fillStyle = color==='r' ? '#f4e4c1' : '#e8e0cc';
     ctx.fill();
+    ctx.shadowBlur=0; ctx.shadowOffsetY=0;
     ctx.lineWidth=2; ctx.strokeStyle = color==='r' ? '#b3392c' : '#2a2a2a';
     ctx.stroke();
     ctx.fillStyle = color==='r' ? '#b3392c' : '#2a2a2a';
@@ -1409,19 +1550,23 @@ function renderBanqi(){
   }
   if(xqSelR>=0){
     const [x,y]=bqXY(xqSelC,xqSelR);
-    ctx.strokeStyle='rgba(255,210,60,0.95)';ctx.lineWidth=3;
+    const a=pulseAlpha();
+    ctx.strokeStyle=`rgba(255,210,60,${0.7+0.3*a})`;ctx.lineWidth=3;
     ctx.beginPath();ctx.arc(x,y,Math.min(BQ_STEPX,BQ_STEPY)*0.46,0,Math.PI*2);ctx.stroke();
   }
-  xqSelMoves.forEach(([r,c])=>{
+  if (roomSettings.showHints!==false) xqSelMoves.forEach(([r,c])=>{
     const [x,y]=bqXY(c,r);
-    ctx.fillStyle='rgba(80,200,100,0.6)';
-    ctx.beginPath();ctx.arc(x,y,7,0,Math.PI*2);ctx.fill();
+    const a=pulseAlpha();
+    ctx.fillStyle=`rgba(80,200,100,${0.45+0.3*a})`;
+    ctx.beginPath();ctx.arc(x,y,6+2*a,0,Math.PI*2);ctx.fill();
   });
   if(lastMove){
     const [x,y]=bqXY(lastMove.col,lastMove.row);
-    const s=Math.min(BQ_STEPX,BQ_STEPY)*0.48;
+    const age=moveAge(), s=Math.min(BQ_STEPX,BQ_STEPY)*(0.48+(1-age)*.15);
+    ctx.save(); ctx.globalAlpha=0.5+0.5*(1-age);
     ctx.strokeStyle='rgba(255,120,40,0.9)';ctx.lineWidth=2;
     ctx.strokeRect(x-s,y-s,s*2,s*2);
+    ctx.restore();
   }
 }
 
@@ -1431,14 +1576,16 @@ function renderXiangqi(){
 }
 
 function resizeCanvas(){
-  const maxW=window.innerWidth-60;
-  const maxH=window.innerHeight-240;
-  const ratio=canvas.width/canvas.height;
-  let w=Math.min(maxW,canvas.width), h=w/ratio;
-  if (h>maxH) { h=Math.min(maxH,canvas.height); w=h*ratio; }
+  const maxW=window.innerWidth-40;
+  const maxH=window.innerHeight-180;
+  const ratio=logicalW/logicalH;
+  const nativeMax=logicalW*1.35;
+  let w=Math.min(maxW,nativeMax), h=w/ratio;
+  if (h>maxH) { h=Math.min(maxH,logicalH*1.35); w=h*ratio; }
   canvas.style.width=w+'px'; canvas.style.height=h+'px';
 }
 window.addEventListener('resize',resizeCanvas);
+setCanvasSize(GCSIZE,GCSIZE);
 resizeCanvas();
 drawGomokuBoard();
 })();
@@ -1448,12 +1595,14 @@ drawGomokuBoard();
 :root{--board-dark:#9c7a3a;--bg:#1a1410;--panel:#221c14;--gold:#d4a94a;--gold-l:#f0c96a;--text:#f0e6cc;--muted:#a08860;}
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:var(--bg);color:var(--text);font-family:'Noto Serif TC',serif;min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;background-image:radial-gradient(ellipse at 20% 20%,rgba(180,140,60,.08) 0%,transparent 60%),radial-gradient(ellipse at 80% 80%,rgba(120,60,20,.1) 0%,transparent 60%);padding:1.5rem}
-h1{font-family:'Cinzel',serif;font-size:clamp(1.6rem,5vw,2.5rem);color:var(--gold);text-shadow:0 0 30px rgba(212,169,74,.4);letter-spacing:.3em;text-align:center;margin-bottom:.3rem}
+h1{font-family:'Cinzel',serif;font-size:clamp(1.8rem,6vw,3rem);color:var(--gold);text-shadow:0 0 30px rgba(212,169,74,.4);letter-spacing:.3em;text-align:center;margin-bottom:.3rem}
 .sub{font-size:.95rem;color:var(--muted);letter-spacing:.2em;text-align:center;margin-bottom:1.5rem}
 
 /* LOBBY */
-#lobby{background:var(--panel);border:1px solid rgba(212,169,74,.2);border-radius:20px;padding:2rem 1.8rem;width:clamp(320px,95vw,520px)}
-.lobby-title{font-family:'Cinzel',serif;font-size:1.2rem;color:var(--gold);letter-spacing:.2em;margin-bottom:1.2rem;text-align:center}
+#lobby{background:var(--panel);border:1px solid rgba(212,169,74,.2);border-radius:20px;padding:2.2rem 2rem;width:clamp(340px,95vw,620px)}
+.join-row{display:flex;gap:.6rem;align-items:stretch}
+.join-row input{flex:1;margin-bottom:0}
+.lobby-title{font-family:'Cinzel',serif;font-size:1.4rem;color:var(--gold);letter-spacing:.2em;margin-bottom:1.2rem;text-align:center}
 .game-pills{display:grid;grid-template-columns:repeat(4,1fr);gap:.8rem;margin-bottom:1.5rem}
 .game-pill{padding:1rem;background:rgba(255,255,255,.03);border:2px solid rgba(212,169,74,.2);border-radius:10px;cursor:pointer;text-align:center;transition:all .2s}
 .game-pill.active{border-color:var(--gold);background:rgba(212,169,74,.1)}
@@ -1476,6 +1625,7 @@ select option{background:#221c14;color:var(--text)}
 .btn:hover{background:rgba(212,169,74,.12);border-color:var(--gold)}
 .btn:active{transform:scale(.98)}
 .lobby-msg{font-size:.95rem;text-align:center;min-height:1.4em;font-weight:500}
+.hint-text{font-size:.8rem;color:var(--muted);margin:-.6rem 0 1rem;text-align:center}
 .dv{height:2px;background:rgba(212,169,74,.12);margin:1.2rem 0}
 #wait-pulse{text-align:center;font-size:.9rem;color:var(--muted);letter-spacing:.1em;animation:pulse 2s infinite;padding:1rem;border:2px dashed rgba(212,169,74,.2);border-radius:8px;margin-top:.8rem}
 @keyframes pulse{0%,100%{opacity:.4}50%{opacity:1}}
@@ -1483,8 +1633,8 @@ select option{background:#221c14;color:var(--text)}
 
 /* GAME */
 #game{display:none;align-items:flex-start;gap:1.5rem;flex-wrap:wrap;justify-content:center;width:100%}
-.side{background:var(--panel);border:1px solid rgba(212,169,74,.2);border-radius:16px;padding:1.5rem;width:200px;display:flex;flex-direction:column;gap:1rem}
-.game-type-badge{font-family:'Cinzel',serif;font-size:.9rem;color:var(--gold);text-align:center;padding:.6rem;background:rgba(212,169,74,.08);border-radius:6px;letter-spacing:.1em;border:1px solid rgba(212,169,74,.15)}
+.side{background:var(--panel);border:1px solid rgba(212,169,74,.2);border-radius:16px;padding:1.6rem;width:240px;display:flex;flex-direction:column;gap:1rem}
+.game-type-badge{font-family:'Cinzel',serif;font-size:1.05rem;font-weight:700;color:var(--gold);text-align:center;padding:.7rem;background:rgba(212,169,74,.1);border-radius:8px;letter-spacing:.1em;border:1px solid rgba(212,169,74,.25)}
 .sec-label{font-size:.8rem;color:var(--muted);letter-spacing:.15em;text-transform:uppercase;font-weight:600}
 .player-card{background:rgba(255,255,255,.03);border-radius:10px;padding:1.2rem;border:2px solid transparent;transition:border-color .3s,background .3s;position:relative;overflow:hidden}
 .player-card.active{border-color:var(--gold);background:rgba(212,169,74,.06)}
@@ -1531,8 +1681,12 @@ select option{background:#221c14;color:var(--text)}
 .chat-row button:hover{background:rgba(212,169,74,.25)}
 /* Board */
 .board-wrap{position:relative}
-canvas#board{display:block;cursor:crosshair;box-shadow:0 0 0 8px #0d4020,0 0 0 12px rgba(0,100,40,.3),0 25px 70px rgba(0,0,0,.7);border-radius:4px}
-canvas#board.gomoku{box-shadow:0 0 0 8px var(--board-dark),0 0 0 12px rgba(212,169,74,.15),0 25px 70px rgba(0,0,0,.7)}
+canvas#board{display:block;cursor:crosshair;border-radius:8px;transition:box-shadow .3s;box-shadow:0 0 0 8px #0d4020,0 0 0 12px rgba(0,100,40,.3),0 25px 70px rgba(0,0,0,.7)}
+canvas#board.gomoku{box-shadow:0 0 0 8px var(--board-dark),0 0 0 12px rgba(212,169,74,.18),0 25px 70px rgba(0,0,0,.7)}
+canvas#board.othello{box-shadow:0 0 0 8px #0d4020,0 0 0 12px rgba(0,100,40,.3),0 25px 70px rgba(0,0,0,.7)}
+canvas#board.xiangqi{box-shadow:0 0 0 8px #6b3a1a,0 0 0 12px rgba(212,169,74,.22),0 25px 70px rgba(0,0,0,.7)}
+canvas#board.banqi{box-shadow:0 0 0 8px #0d3a2e,0 0 0 12px rgba(212,169,74,.18),0 25px 70px rgba(0,0,0,.7)}
+canvas#board.connect4{box-shadow:0 0 0 8px #0a2a4d,0 0 0 12px rgba(80,150,230,.25),0 25px 70px rgba(0,0,0,.7)}
 /* Flash */
 #flash-msg{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(180,30,30,.9);color:#fff;padding:1rem 1.5rem;border-radius:10px;font-size:1.1rem;letter-spacing:.1em;opacity:0;transition:opacity .4s;pointer-events:none;white-space:nowrap;font-weight:700}
 /* Win overlay */
@@ -1566,6 +1720,10 @@ footer{margin-top:1.5rem;font-size:.8rem;color:var(--muted);letter-spacing:.1em;
 
   <div id="step-select-game">
     <div class="lobby-title">選擇棋種</div>
+
+    <div class="field-label">你的暱稱</div>
+    <input type="text" id="nick-input" placeholder="輸入暱稱（最多12字）" maxlength="12">
+    <div class="hint-text">請先輸入暱稱，才能建立或加入房間</div>
 
     <div class="game-pills">
       <div class="game-pill active" onclick="selectGame('gomoku',this)">
@@ -1603,16 +1761,20 @@ footer{margin-top:1.5rem;font-size:.8rem;color:var(--muted);letter-spacing:.1em;
       </div>
     </div>
 
-    <button class="btn" onclick="goToRoomStep()">下一步 →</button>
+    <button class="btn" onclick="goToRoomStep()">＋ 建立房間 →</button>
+
+    <div class="dv"></div>
+    <div class="field-label">加入現有房間</div>
+    <div class="join-row">
+      <input type="text" id="room-input" placeholder="輸入6位房間號" maxlength="6" style="text-transform:uppercase;letter-spacing:.2em">
+      <button class="btn" style="width:auto;flex-shrink:0" onclick="joinRoomById()">→ 加入</button>
+    </div>
+    <div id="lobby-msg-join" class="lobby-msg"></div>
   </div>
 
   <div id="step-room" style="display:none">
   <div class="game-type-badge" id="selected-game-badge" style="margin-bottom:1.2rem">五子棋</div>
 
-  <div class="field-label">你的暱稱</div>
-  <input type="text" id="nick-input" placeholder="輸入暱稱（最多12字）" maxlength="12">
-
-  <div class="dv"></div>
   <div class="field-label" style="margin-bottom:1rem">房間設定</div>
 
   <div class="settings-grid">
@@ -1655,17 +1817,18 @@ footer{margin-top:1.5rem;font-size:.8rem;color:var(--muted);letter-spacing:.1em;
     </div>
   </div>
 
+  <div id="show-hints-row" class="checkbox-row" style="display:none">
+    <input type="checkbox" id="opt-show-hints" checked>
+    <label for="opt-show-hints">顯示可下棋位置提示
+      <small>關閉後不顯示提示點，僅黑白棋/象棋適用，房主可隨時於房間內調整</small>
+    </label>
+  </div>
+
   <button class="btn" onclick="createRoom()">＋ 建立房間</button>
-
-  <div class="dv"></div>
-  <div class="field-label">加入現有房間</div>
-  <input type="text" id="room-input" placeholder="輸入6位房間號" maxlength="6" style="text-transform:uppercase;letter-spacing:.2em">
-  <button class="btn" onclick="joinRoomById()">→ 加入房間</button>
-
   <div id="lobby-msg" class="lobby-msg"></div>
 
   <div class="dv"></div>
-  <button class="btn" style="border-color:rgba(212,169,74,.2);color:var(--muted)" onclick="backToGameStep()">← 重新選擇棋種</button>
+  <button class="btn" style="border-color:rgba(212,169,74,.2);color:var(--muted)" onclick="backToGameStep()">← 返回</button>
   </div>
 
   <div id="step-waiting" style="display:none;text-align:center">
@@ -1711,6 +1874,11 @@ footer{margin-top:1.5rem;font-size:.8rem;color:var(--muted);letter-spacing:.1em;
     <div id="room-opt-forbidden-row" class="checkbox-row" style="text-align:left">
       <input type="checkbox" id="room-opt-forbidden">
       <label for="room-opt-forbidden">啟用黑方禁手<small>三三禁、四四禁（僅五子棋，黑方限定）</small></label>
+    </div>
+
+    <div id="room-opt-show-hints-row" class="checkbox-row" style="display:none;text-align:left">
+      <input type="checkbox" id="room-opt-show-hints">
+      <label for="room-opt-show-hints">顯示可下棋位置提示<small>關閉後不顯示提示點</small></label>
     </div>
 
     <button class="btn" id="wait-save-btn" onclick="saveRoomRules()">儲存規則</button>
