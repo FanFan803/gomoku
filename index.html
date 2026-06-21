@@ -28,6 +28,7 @@ function applySavedSettingsToForm() {
   document.getElementById('opt-first').value = saved?.firstPlayerPref || 'random';
   document.getElementById('opt-forbidden').checked = !!saved?.forbiddenBlack;
   document.getElementById('opt-show-hints').checked = saved?.showHints !== false;
+  document.getElementById('opt-king').checked = !!saved?.ccKing;
 }
 
 window.selectGame = function(type, el) {
@@ -35,16 +36,21 @@ window.selectGame = function(type, el) {
   document.querySelectorAll('.game-pill').forEach(p=>{ if(!p.classList.contains('xq-variant-pill')) p.classList.remove('active'); });
   el.classList.add('active');
   document.getElementById('gomoku-only-opts').style.display = type==='gomoku' ? '' : 'none';
+  document.getElementById('checkers-only-opts').style.display = type==='checkers' ? '' : 'none';
   document.getElementById('xq-variant-pills').style.display = type==='xiangqi' ? '' : 'none';
-  document.getElementById('board-size-field').style.display = (type==='xiangqi'||type==='connect4'||type==='chess') ? 'none' : '';
-  document.getElementById('show-hints-row').style.display = (type==='othello'||type==='xiangqi'||type==='chess') ? '' : 'none';
+  document.getElementById('board-size-field').style.display = (type==='xiangqi'||type==='connect4'||type==='chess'||type==='animalchess'||type==='shogi') ? 'none' : '';
+  document.getElementById('show-hints-row').style.display = (type==='othello'||type==='xiangqi'||type==='chess'||type==='animalchess'||type==='shogi'||type==='checkers') ? '' : 'none';
+  document.getElementById('first-player-field').style.display = type==='checkers' ? 'none' : '';
   document.getElementById('opt-first-white').textContent = type==='xiangqi' ? '我執紅（後）' : '我執白（後）';
   const sizeEl = document.getElementById('opt-size');
   if (type==='othello') {
     sizeEl.innerHTML = '<option value="8" selected>8x8（標準）</option><option value="6">6x6（小）</option>';
   } else if (type==='gomoku') {
     sizeEl.innerHTML = '<option value="13">13x13（小）</option><option value="15" selected>15x15（標準）</option><option value="19">19x19（大）</option>';
+  } else if (type==='checkers') {
+    sizeEl.innerHTML = '<option value="10" selected>10 子（標準）</option><option value="15">15 子（大）</option>';
   }
+  document.getElementById('board-size-label').textContent = type==='checkers' ? '每人棋子數' : '棋盤大小';
 };
 
 window.selectXqVariant = function(v, el) {
@@ -63,6 +69,9 @@ window.goToRoomStep = function() {
     gameType==='xiangqi' ? (xqVariant==='banqi' ? '🀫 暗棋 Banqi' : '🐎 象棋 Xiangqi') :
     gameType==='connect4' ? '🔵 四子棋 Connect Four' :
     gameType==='chess' ? '♟ 西洋棋 Chess' :
+    gameType==='animalchess' ? '🦁 動物將棋 Animal Chess' :
+    gameType==='shogi' ? '将 將棋 Shogi' :
+    gameType==='checkers' ? '🔺 跳棋（三人）Checkers' :
     '⚫ 五子棋 Gomoku';
   applySavedSettingsToForm();
 };
@@ -141,6 +150,166 @@ const CH_STEPX=(CH_W-CH_PAD*2)/CH_COLS;
 const CH_STEPY=(CH_H-CH_PAD*2)/CH_ROWS;
 const CH_NAME={w:{K:'♔',Q:'♕',R:'♖',B:'♗',N:'♘',P:'♙'},b:{K:'♚',Q:'♛',R:'♜',B:'♝',N:'♞',P:'♟'}};
 
+// ─── Animal Chess (動物將棋) config ───
+const AC_COLS=3, AC_ROWS=4, AC_W=300, AC_H=400, AC_PAD=24;
+const AC_STEPX=(AC_W-AC_PAD*2)/AC_COLS;
+const AC_STEPY=(AC_H-AC_PAD*2)/AC_ROWS;
+const AC_NAME={L:'獅',E:'象',G:'麒',C:'雛',H:'鶏'};
+
+// ─── Shogi (將棋) config ───
+const SG_COLS=9, SG_ROWS=9, SG_W=630, SG_H=630, SG_PAD=30;
+const SG_STEPX=(SG_W-SG_PAD*2)/SG_COLS;
+const SG_STEPY=(SG_H-SG_PAD*2)/SG_ROWS;
+const SG_NAME={K:'王',R:'飛',B:'角',G:'金',S:'銀',N:'桂',L:'香',P:'歩',D:'龍',H:'馬',X:'全',Y:'圭',Z:'杏',T:'と'};
+const SG_PROMOTE={R:'D',B:'H',S:'X',N:'Y',L:'Z',P:'T'};
+const SG_DEMOTE={D:'R',H:'B',X:'S',Y:'N',Z:'L',T:'P'};
+const SG_GOLDLIKE=['G','X','Y','Z','T'];
+
+// ─── Chinese Checkers (跳棋／彈珠跳棋, 3-player) config ───
+// Hexagram board: a radius-R hexagon plus 6 triangular "points" of (R rows,
+// 1..R cells) each, built from a single axial wedge rotated 60° six times.
+// R=4 → 121 cells / 10 pieces per seat (standard); R=5 → 181 cells / 15 pieces
+// (large variant, selectable via the room's "棋盤大小" option). Movement
+// adjacency uses plain integer axial hex coordinates (rotation preserves
+// integer-ness), so jump legality is exact, not pixel-distance guesswork.
+const CC_W=760, CC_H=760, CC_CX=380, CC_CY=380;
+const CC_DIRS=[[1,0],[1,-1],[0,-1],[-1,0],[-1,1],[0,1]];
+let CC_RADIUS = 4;        // 4 = 10 pieces/seat, 5 = 15 pieces/seat
+let CC_CELL = 38;
+let CC_CELLS = null;      // [{q,r,x,y,corner}]
+let CC_INDEX = null;      // Map "q,r" -> index into CC_CELLS
+const CC_SEAT_CORNER = {black:0, white:2, p3:4}; // 3-player: alternating corners, 120° apart, keyed by actual room seat names
+
+function ccPiecesToRadius(pieces){ return pieces>=15 ? 5 : 4; }
+function ccSetRadius(radius){
+  if (CC_RADIUS===radius && CC_CELLS) return;
+  CC_RADIUS = radius;
+  CC_CELL = radius>=5 ? 30 : 38;
+  CC_CELLS = null; CC_INDEX = null;
+}
+
+function ccRotate60(q,r){ return [-r, q+r]; }
+
+// Display-only rotation so the local player's home corner always renders at
+// the bottom (corner index 3, opposite corner 0 which sits at the top of the
+// raw axial layout) — purely visual, the underlying board/index never changes.
+function ccViewShift(){
+  if (!myColor || !(myColor in CC_SEAT_CORNER)) return 0;
+  return ((3 - CC_SEAT_CORNER[myColor]) % 6 + 6) % 6;
+}
+function ccDisplayXY(idx){
+  const c=CC_CELLS[idx];
+  const shift=ccViewShift();
+  if (!shift) return [c.x,c.y];
+  let q=c.q, r=c.r;
+  for(let i=0;i<shift;i++){ const nq=-r, nr=q+r; q=nq; r=nr; }
+  return ccAxialToPixel(q,r);
+}
+
+function ccAxialToPixel(q,r){
+  const dx=CC_CELL, dy=CC_CELL*Math.sqrt(3)/2;
+  return [CC_CX+dx*(q+r/2), CC_CY+dy*r];
+}
+
+function ccBuildBoard(){
+  if (CC_CELLS) return CC_CELLS;
+  const R=CC_RADIUS;
+  const coords=[];
+  for(let r=-R;r<=R;r++){
+    const qMin=Math.max(-R,-R-r), qMax=Math.min(R,R-r);
+    for(let q=qMin;q<=qMax;q++) coords.push([q,r,-1]);
+  }
+  let wedge=[];
+  for(let r=-(R+1); r>=-(2*R); r--){
+    const width=(2*R+1)-Math.abs(r);
+    for(let q=(R+1-width); q<=R; q++) wedge.push([q,r]);
+  }
+  for(let corner=0;corner<6;corner++){
+    wedge.forEach(([q,r])=>coords.push([q,r,corner]));
+    wedge = wedge.map(([q,r])=>ccRotate60(q,r));
+  }
+  CC_CELLS = coords.map(([q,r,corner])=>{
+    const [x,y]=ccAxialToPixel(q,r);
+    return {q,r,x,y,corner};
+  });
+  CC_INDEX = new Map();
+  CC_CELLS.forEach((c,i)=>CC_INDEX.set(c.q+','+c.r, i));
+  return CC_CELLS;
+}
+
+function ccIdxAt(q,r){ ccBuildBoard(); return CC_INDEX.has(q+','+r) ? CC_INDEX.get(q+','+r) : -1; }
+
+function ccCornerCells(corner){
+  ccBuildBoard();
+  return CC_CELLS.map((c,i)=>({c,i})).filter(o=>o.c.corner===corner).map(o=>o.i);
+}
+
+// All single-step and jump-chain destinations for the piece at cell index `from`.
+function ccLegalMoves(flat, from){
+  ccBuildBoard();
+  const f=CC_CELLS[from];
+  const moves=[];
+  // single steps
+  CC_DIRS.forEach(([dq,dr])=>{
+    const idx=ccIdxAt(f.q+dq, f.r+dr);
+    if (idx>=0 && !flat[idx]) moves.push(idx);
+  });
+  // jump chains (BFS over multi-jumps), landing cells must be empty
+  const seen=new Set([from]);
+  const queue=[from];
+  while(queue.length){
+    const cur=queue.shift();
+    const cc=CC_CELLS[cur];
+    CC_DIRS.forEach(([dq,dr])=>{
+      const midIdx=ccIdxAt(cc.q+dq, cc.r+dr);
+      if (midIdx<0 || !flat[midIdx]) return;
+      const landIdx=ccIdxAt(cc.q+dq*2, cc.r+dr*2);
+      if (landIdx<0 || flat[landIdx] || seen.has(landIdx)) return;
+      seen.add(landIdx); queue.push(landIdx);
+      if (landIdx!==from) moves.push(landIdx);
+    });
+  }
+  return [...new Set(moves)];
+}
+
+// Cell value for a non-king piece is just the seat name; the king piece (when
+// king mode is on) is marked with a 'K' suffix so it can be told apart from
+// other same-seat pieces after it moves. ccSeatOf() strips that suffix.
+function ccSeatOf(cell){ return cell ? cell.replace('K','') : ''; }
+function ccIsKingCell(cell){ return !!cell && cell.endsWith('K'); }
+
+// The single cell of a corner farthest from the board center — where the king
+// piece starts, and (on the opposite corner) where it must finish.
+function ccApexCell(corner){
+  ccBuildBoard();
+  let best=-1, bestDist=-1;
+  ccCornerCells(corner).forEach(i=>{
+    const c=CC_CELLS[i], dx=c.x-CC_CX, dy=c.y-CC_CY, dist=dx*dx+dy*dy;
+    if (dist>bestDist){ bestDist=dist; best=i; }
+  });
+  return best;
+}
+
+function ccMakeInitBoard(kingMode){
+  ccBuildBoard();
+  const flat = new Array(CC_CELLS.length).fill('');
+  Object.entries(CC_SEAT_CORNER).forEach(([seat,corner])=>{
+    const apex = kingMode ? ccApexCell(corner) : -1;
+    ccCornerCells(corner).forEach(i=>{ flat[i] = (i===apex) ? seat+'K' : seat; });
+  });
+  return flat;
+}
+
+// A seat wins once all of its pieces occupy the corner opposite its start;
+// in king mode the king piece must additionally land exactly on that corner's apex.
+function ccHasWon(flat, seat, kingMode){
+  const targetCorner=(CC_SEAT_CORNER[seat]+3)%6;
+  const targetCells=ccCornerCells(targetCorner);
+  if (!(targetCells.length>0 && targetCells.every(i=>ccSeatOf(flat[i])===seat))) return false;
+  if (!kingMode) return true;
+  return flat[ccApexCell(targetCorner)]===seat+'K';
+}
+
 // ─── state ───
 // gameType declared outside IIFE
 let myColor   = null;
@@ -164,9 +333,20 @@ let BSIZE=15, CSIZE=540, PAD=30, STEP=36;
 // Black's pieces start at row 0 (top) in the canonical layout, so the black seat
 // needs the 180° flip to bring its own pieces to the bottom of its screen.
 function boardFlipped(){ return myColor==='black'; }
+function acFlip(r,c){ return boardFlipped() ? [AC_ROWS-1-r, AC_COLS-1-c] : [r,c]; }
+function sgFlip(r,c){ return boardFlipped() ? [SG_ROWS-1-r, SG_COLS-1-c] : [r,c]; }
 
-// Xiangqi/Banqi selection state (client-local only)
+// Xiangqi/Banqi/AnimalChess/Shogi selection state (client-local only)
 let xqSelR=-1, xqSelC=-1, xqSelMoves=[];
+
+// Hand/drop state (Animal Chess, Shogi): non-null while a captured piece is
+// selected from hand, waiting for a destination click to drop it.
+let handDropType = null;
+let handState = { black:{}, white:{} };
+
+// Pending promotion choice (Shogi): set when a legal move is promotion-eligible,
+// waiting for the player to confirm via the #promo-prompt overlay.
+let pendingMove = null;
 
 // Othello flip animation state
 let flipAnims = [];
@@ -216,15 +396,20 @@ window.createRoom = async function() {
   if (!nick) { lobbyMsg('請輸入暱稱', true); return; }
   nickname = filterProfanity(nick);
 
-  const boardSize    = (gameType==='xiangqi'||gameType==='connect4'||gameType==='chess') ? null : parseInt(document.getElementById('opt-size').value);
+  const boardSize    = (gameType==='xiangqi'||gameType==='connect4'||gameType==='chess'||gameType==='animalchess'||gameType==='shogi') ? null : parseInt(document.getElementById('opt-size').value);
   let winCount       = parseInt(document.getElementById('opt-wins').value) || 3;
   let timeLimit      = getTimeLimitFromForm('opt');
   const forbiddenBlack = gameType==='gomoku' && document.getElementById('opt-forbidden').checked;
   const showHints    = document.getElementById('opt-show-hints').checked;
+  const ccKing       = gameType==='checkers' && document.getElementById('opt-king').checked;
   const firstPlayerPref = document.getElementById('opt-first').value;
   let firstPlayer = firstPlayerPref;
   let hostColorVal;
-  if (firstPlayer === 'random') {
+  if (gameType==='checkers') {
+    // 3-player game: host is always the 'black' seat; turn order is fixed
+    // black→white→p3, no random color/order concept needed.
+    hostColorVal = 'black'; firstPlayer = 'black';
+  } else if (firstPlayer === 'random') {
     // Decouple host's seat color from turn order: host's color is its own coin
     // flip, and firstPlayer stays 'random' so the actual first move is freshly
     // randomized again in startGame() once both players are present.
@@ -237,18 +422,22 @@ window.createRoom = async function() {
 
   const settings = { gameType, winCount, timeLimit, forbiddenBlack, firstPlayer, showHints };
   if (gameType==='xiangqi') settings.xqVariant = xqVariant;
-  else if (gameType!=='connect4' && gameType!=='chess') settings.boardSize = boardSize;
+  else if (gameType!=='connect4' && gameType!=='chess' && gameType!=='animalchess' && gameType!=='shogi') settings.boardSize = boardSize;
+  if (gameType==='checkers') settings.ccKing = ccKing;
 
-  saveSettingsForType(gameType, { boardSize, winCount, timeLimit, forbiddenBlack, showHints, firstPlayerPref });
+  saveSettingsForType(gameType, { boardSize, winCount, timeLimit, forbiddenBlack, showHints, ccKing, firstPlayerPref });
 
   const id = Math.random().toString(36).slice(2,8).toUpperCase();
   const initBoard = gameType==='othello' ? makeOthelloInitBoard(boardSize)
     : gameType==='xiangqi' ? (xqVariant==='banqi' ? makeBanqiInitBoard() : makeXiangqiStandardBoard())
     : gameType==='connect4' ? Array(C4_COLS*C4_ROWS).fill(0)
     : gameType==='chess' ? makeChessInitBoard()
+    : gameType==='animalchess' ? makeAnimalChessInitBoard()
+    : gameType==='shogi' ? makeShogiInitBoard()
+    : gameType==='checkers' ? (ccSetRadius(ccPiecesToRadius(boardSize)), ccMakeInitBoard(ccKing))
     : Array(boardSize*boardSize).fill(0);
 
-  await set(ref(db, `rooms/${id}`), {
+  const roomObj = {
     settings,
     hostColor: hostColorVal,
     black: { name: hostColorVal==='black'?nick:'等待中', connected: hostColorVal==='black' },
@@ -261,7 +450,9 @@ window.createRoom = async function() {
     scores: { black:0, white:0 },
     timerStart: null,
     passCount: 0   // for othello
-  });
+  };
+  if (gameType==='checkers') { roomObj.p3 = { name:'等待中', connected:false }; roomObj.scores.p3 = 0; }
+  await set(ref(db, `rooms/${id}`), roomObj);
 
   roomId  = id; myColor = hostColorVal;
   joinRoom(id);
@@ -284,8 +475,18 @@ window.joinRoomById = async function() {
   if (!snap.exists()) { lobbyMsg('房間不存在', true, 'lobby-msg-join'); return; }
   const d = snap.val();
   if (d.status !== 'waiting') { lobbyMsg('房間已滿或已開始', true, 'lobby-msg-join'); return; }
-  const joinColor = d.hostColor==='black' ? 'white' : 'black';
-  const upd = { status:'ready' };
+  let joinColor, newStatus;
+  if (d.settings?.gameType==='checkers') {
+    const seats=['black','white','p3'];
+    joinColor = seats.find(s=>!d[s]?.connected);
+    if (!joinColor) { lobbyMsg('房間已滿', true, 'lobby-msg-join'); return; }
+    const filledAfter = seats.filter(s=>s===joinColor || d[s]?.connected).length;
+    newStatus = filledAfter>=3 ? 'ready' : 'waiting';
+  } else {
+    joinColor = d.hostColor==='black' ? 'white' : 'black';
+    newStatus = 'ready';
+  }
+  const upd = { status:newStatus };
   upd[joinColor] = { name:nick, connected:true };
   await update(ref(db, `rooms/${id}`), upd);
   roomId=id; myColor=joinColor;
@@ -315,11 +516,15 @@ function joinRoom(id) {
     }
     const d = snap.val();
 
-    const oppColor = myColor==='black'?'white':'black';
-    const oppConnected = !!d[oppColor]?.connected;
-    if (oppConnPrev===null) oppConnPrev = oppConnected;
-    else if (oppConnPrev && !oppConnected) handleOpponentLeft(d, oppColor);
-    oppConnPrev = oppConnected;
+    const oppSeats = d.settings?.gameType==='checkers'
+      ? ['black','white','p3'].filter(s=>s!==myColor)
+      : [myColor==='black'?'white':'black'];
+    const curConn = {}; oppSeats.forEach(s=>{ curConn[s]=!!d[s]?.connected; });
+    if (oppConnPrev===null) oppConnPrev = curConn;
+    else {
+      oppSeats.forEach(s=>{ if (oppConnPrev[s] && !curConn[s]) handleOpponentLeft(d, s); });
+      oppConnPrev = curConn;
+    }
 
     if (d.status==='playing'||d.status==='over') {
       document.getElementById('lobby').style.display = 'none';
@@ -330,7 +535,8 @@ function joinRoom(id) {
       document.getElementById('game').style.display = 'none';
       document.getElementById('lobby').style.display = '';
       renderRoomLobby(d);
-      if (d.status==='ready' && d.roundReady && d.roundReady.black && d.roundReady.white) {
+      const allReady = d.roundReady && d.roundReady.black && d.roundReady.white && (d.settings?.gameType!=='checkers' || d.roundReady.p3);
+      if (d.status==='ready' && allReady) {
         maybeStartNextRound(d);
       } else {
         nextRoundTriggered = false;
@@ -346,10 +552,13 @@ async function scheduleRoundTransition(d) {
   setTimeout(async () => {
     const snap = await get(roomRef); const cur = snap.val();
     if (!cur || cur.status!=='over') return;
+    const isCheckers = cur.settings?.gameType==='checkers';
     if (cur.matchOver || cur.terminatedByLeave) {
-      await update(roomRef, {status:'ready', scores:{black:0,white:0}, roundReady:null, winner:null, winnerName:null, winLine:null, matchOver:false, lastMove:null, terminatedByLeave:null, timeoutLoser:null});
+      const scores = isCheckers ? {black:0,white:0,p3:0} : {black:0,white:0};
+      await update(roomRef, {status:'ready', scores, roundReady:null, winner:null, winnerName:null, winLine:null, matchOver:false, lastMove:null, terminatedByLeave:null, timeoutLoser:null});
     } else {
-      await update(roomRef, {status:'ready', roundReady:{black:false,white:false}});
+      const roundReady = isCheckers ? {black:false,white:false,p3:false} : {black:false,white:false};
+      await update(roomRef, {status:'ready', roundReady});
     }
   }, 1800);
 }
@@ -367,7 +576,7 @@ async function maybeStartNextRound(d) {
 
 async function startNextRound(d) {
   const s=d.settings;
-  const nextFirst = s.firstPlayer==='black'?'white':'black';
+  const nextFirst = s.gameType==='checkers' ? 'black' : (s.firstPlayer==='black'?'white':'black');
   let initBoard, extra={xqColor:null,bqColor:null};
   if (s.gameType==='othello') initBoard=makeOthelloInitBoard(s.boardSize);
   else if (s.gameType==='xiangqi') {
@@ -375,6 +584,9 @@ async function startNextRound(d) {
     else { initBoard=makeXiangqiStandardBoard(); extra.xqColor = nextFirst==='black'?{black:'r',white:'b'}:{black:'b',white:'r'}; }
   } else if (s.gameType==='connect4') initBoard=Array(C4_COLS*C4_ROWS).fill(0);
   else if (s.gameType==='chess') initBoard=makeChessInitBoard();
+  else if (s.gameType==='animalchess') { initBoard=makeAnimalChessInitBoard(); extra.hand={black:{},white:{}}; }
+  else if (s.gameType==='shogi') { initBoard=makeShogiInitBoard(); extra.hand={black:{},white:{}}; }
+  else if (s.gameType==='checkers') { ccSetRadius(ccPiecesToRadius(s.boardSize)); initBoard=ccMakeInitBoard(s.ccKing); }
   else initBoard=Array(s.boardSize*s.boardSize).fill(0);
   await update(roomRef, {
     board:initBoard, currentTurn:nextFirst, status:'playing', lastMove:null, moveCount:0,
@@ -385,17 +597,25 @@ async function startNextRound(d) {
 }
 
 async function handleOpponentLeft(d, oppColor) {
-  const oppName = d[oppColor]?.name || (oppColor==='black'?'黑方':'白方');
+  const isCheckers = d.settings?.gameType==='checkers';
+  const oppName = d[oppColor]?.name || (oppColor==='black'?'黑方':oppColor==='white'?'白方':'第三家');
   if (d.status==='playing') {
     showFlash(`${oppName} 已離線，對局自動結束`);
     if (chatRef) push(chatRef,{name:'系統',color:'system',text:`${oppName} 已離線，對局自動結束`,ts:serverTimestamp()});
-    await update(roomRef,{status:'over',winner:myColor,winnerName:nickname,winLine:[],matchOver:false,terminatedByLeave:true});
+    if (isCheckers) {
+      // 3-player: any disconnect voids the round rather than crowning a winner,
+      // since the other two players may still be innocent and present.
+      await update(roomRef,{status:'over',winner:'draw',winnerName:'對局中斷',winLine:[],matchOver:false,terminatedByLeave:true});
+    } else {
+      await update(roomRef,{status:'over',winner:myColor,winnerName:nickname,winLine:[],matchOver:false,terminatedByLeave:true});
+    }
   } else if (d.status==='waiting'||d.status==='ready') {
     showFlash(`${oppName} 已離開房間`);
     if (chatRef) push(chatRef,{name:'系統',color:'system',text:`${oppName} 已離開房間`,ts:serverTimestamp()});
     if (isHost(d)) {
-      await update(roomRef,{status:'waiting',[oppColor]:{name:'等待中',connected:false},roundReady:null,scores:{black:0,white:0}});
-    } else {
+      const scores = isCheckers ? {black:0,white:0,p3:0} : {black:0,white:0};
+      await update(roomRef,{status:'waiting',[oppColor]:{name:'等待中',connected:false},roundReady:null,scores});
+    } else if (oppColor===d.hostColor) {
       setTimeout(()=>{ showFlash('主辦方已離開，將返回大廳'); window.leaveRoom(); },1500);
     }
   }
@@ -426,12 +646,17 @@ function renderRoomLobby(d) {
 
   document.getElementById('wait-room-code').textContent = roomId;
   {
-    const colorName = myColor==='black' ? '黑' : (s.gameType==='xiangqi' ? '紅' : '白');
-    if (s.firstPlayer==='random') {
-      document.getElementById('wait-color-badge').textContent = `你執${colorName}（先後隨機決定，開始遊戲時擲骰）`;
+    if (s.gameType==='checkers') {
+      const ccColorName = myColor==='black'?'紅':myColor==='white'?'黃':'綠';
+      document.getElementById('wait-color-badge').textContent = `你執${ccColorName}方`;
     } else {
-      const isFirst = s.firstPlayer ? s.firstPlayer===myColor : myColor==='black';
-      document.getElementById('wait-color-badge').textContent = `你執${colorName}（${isFirst?'先':'後'}）`;
+      const colorName = myColor==='black' ? '黑' : (s.gameType==='xiangqi' ? '紅' : '白');
+      if (s.firstPlayer==='random') {
+        document.getElementById('wait-color-badge').textContent = `你執${colorName}（先後隨機決定，開始遊戲時擲骰）`;
+      } else {
+        const isFirst = s.firstPlayer ? s.firstPlayer===myColor : myColor==='black';
+        document.getElementById('wait-color-badge').textContent = `你執${colorName}（${isFirst?'先':'後'}）`;
+      }
     }
   }
   document.getElementById('wait-game-label').textContent =
@@ -439,11 +664,16 @@ function renderRoomLobby(d) {
     s.gameType==='xiangqi' ? (s.xqVariant==='banqi' ? '暗棋 BANQI' : '象棋（大盤）XIANGQI') :
     s.gameType==='connect4' ? '四子棋 CONNECT FOUR' :
     s.gameType==='chess' ? '西洋棋 CHESS' :
+    s.gameType==='animalchess' ? '動物將棋 ANIMAL CHESS' :
+    s.gameType==='shogi' ? '將棋 SHOGI' :
+    s.gameType==='checkers' ? '跳棋（三人）CHECKERS' :
     '五子棋 GOMOKU';
 
+  const isCheckers = s.gameType==='checkers';
   document.getElementById('wait-players').innerHTML =
     `<div>● ${esc(d.black?.name||'等待中')}${d.black?.connected?' <span class="dot-on"></span>':''}</div>
-     <div>○ ${esc(d.white?.name||'等待中')}${d.white?.connected?' <span class="dot-on"></span>':''}</div>`;
+     <div>○ ${esc(d.white?.name||'等待中')}${d.white?.connected?' <span class="dot-on"></span>':''}</div>` +
+    (isCheckers ? `<div>◆ ${esc(d.p3?.name||'等待中')}${d.p3?.connected?' <span class="dot-on"></span>':''}</div>` : '');
 
   const betweenRounds = !!d.roundReady;
   document.getElementById('round-ready-block').style.display = betweenRounds ? '' : 'none';
@@ -451,11 +681,14 @@ function renderRoomLobby(d) {
 
   if (betweenRounds) {
     const sc=d.scores||{};
-    document.getElementById('round-score-display').textContent = `黑 ${sc.black||0} ： ${sc.white||0} ${s.gameType==='xiangqi'?'紅':'白'}`;
+    document.getElementById('round-score-display').textContent = isCheckers
+      ? `黑 ${sc.black||0} ／ 白 ${sc.white||0} ／ 第三家 ${sc.p3||0}`
+      : `黑 ${sc.black||0} ： ${sc.white||0} ${s.gameType==='xiangqi'?'紅':'白'}`;
+    const seatLabel = seat => seat==='black'?'黑方':seat==='white'?'白方':'第三家';
+    const otherSeats = isCheckers ? ['black','white','p3'].filter(x=>x!==myColor) : [myColor==='black'?'white':'black'];
     const myReady = !!d.roundReady[myColor];
-    const oppColor = myColor==='black'?'white':'black';
-    const oppReady = !!d.roundReady[oppColor];
-    document.getElementById('round-ready-status').textContent = `你：${myReady?'✓ 已準備':'尚未準備'}　對手：${oppReady?'✓ 已準備':'尚未準備'}`;
+    document.getElementById('round-ready-status').textContent =
+      `你：${myReady?'✓ 已準備':'尚未準備'}　` + otherSeats.map(s2=>`${seatLabel(s2)}：${d.roundReady[s2]?'✓':'尚未'}`).join('　');
     const readyBtn=document.getElementById('round-ready-btn');
     readyBtn.disabled = myReady;
     readyBtn.textContent = myReady ? '已準備，等待對手…' : '✓ 準備下一局';
@@ -476,7 +709,7 @@ window.onRoomGameTypeChange = function() {
   const [gt] = val.split(':');
   const sizeField = document.getElementById('room-opt-size-field');
   const sizeSel = document.getElementById('room-opt-size');
-  if (gt==='xiangqi' || gt==='connect4' || gt==='chess') {
+  if (gt==='xiangqi' || gt==='connect4' || gt==='chess' || gt==='animalchess' || gt==='shogi') {
     sizeField.style.display='none';
   } else {
     sizeField.style.display='';
@@ -485,42 +718,54 @@ window.onRoomGameTypeChange = function() {
       : '<option value="13">13×13（小）</option><option value="15" selected>15×15（標準）</option><option value="19">19×19（大）</option>';
   }
   document.getElementById('room-opt-forbidden-row').style.display = gt==='gomoku' ? '' : 'none';
-  const showHintsCapable = (gt==='othello'||gt==='xiangqi'||gt==='chess');
+  const showHintsCapable = (gt==='othello'||gt==='xiangqi'||gt==='chess'||gt==='animalchess'||gt==='shogi'||gt==='checkers');
   document.getElementById('room-opt-show-hints-row').style.display = showHintsCapable ? '' : 'none';
   if (showHintsCapable) document.getElementById('room-opt-show-hints').checked = true;
 
   const whiteOpt = document.getElementById('room-opt-first-white');
   if (whiteOpt) whiteOpt.textContent = gt==='xiangqi' ? '紅方先' : '白方先';
+  document.getElementById('room-first-player-field').style.display = gt==='checkers' ? 'none' : '';
+  document.getElementById('room-opt-king-row').style.display = gt==='checkers' ? '' : 'none';
 };
 
 function fillRoomRulesForm(s, amHost) {
   document.getElementById('room-opt-gametype').value = s.gameType==='xiangqi' ? `xiangqi:${s.xqVariant||'standard'}` : s.gameType;
-  document.getElementById('room-opt-gametype').disabled = !amHost;
+  // Checkers is 3-player and can't be switched to/from via this dropdown (the
+  // seat model differs entirely), so lock the control whenever it's active.
+  document.getElementById('room-opt-gametype').disabled = !amHost || s.gameType==='checkers';
 
   const sizeField = document.getElementById('room-opt-size-field');
-  if (s.gameType==='xiangqi' || s.gameType==='connect4' || s.gameType==='chess') {
+  const sizeLabel = document.getElementById('room-opt-size-label');
+  if (s.gameType==='xiangqi' || s.gameType==='connect4' || s.gameType==='chess' || s.gameType==='animalchess' || s.gameType==='shogi') {
     sizeField.style.display='none';
   } else {
     sizeField.style.display='';
     const sizeSel = document.getElementById('room-opt-size');
     const opts = s.gameType==='othello'
       ? [[6,'6×6（小）'],[8,'8×8（標準）']]
+      : s.gameType==='checkers'
+      ? [[10,'10 子（標準）'],[15,'15 子（大）']]
       : [[13,'13×13（小）'],[15,'15×15（標準）'],[19,'19×19（大）']];
     sizeSel.innerHTML = opts.map(([v,l])=>`<option value="${v}" ${v===s.boardSize?'selected':''}>${l}</option>`).join('');
     sizeSel.disabled = !amHost;
+    if (sizeLabel) sizeLabel.textContent = s.gameType==='checkers' ? '每人棋子數' : '棋盤大小';
   }
   document.getElementById('room-opt-first-white').textContent = s.gameType==='xiangqi' ? '紅方先' : '白方先';
+  document.getElementById('room-first-player-field').style.display = s.gameType==='checkers' ? 'none' : '';
   document.getElementById('room-opt-wins').value  = s.winCount||3;
   setTimeLimitForm('room-opt', s.timeLimit||0);
   document.getElementById('room-opt-first').value = s.firstPlayer==='white'?'white':s.firstPlayer==='random'?'random':'black';
   document.getElementById('room-opt-forbidden').checked = !!s.forbiddenBlack;
   document.getElementById('room-opt-forbidden-row').style.display = s.gameType==='gomoku' ? '' : 'none';
   document.getElementById('room-opt-show-hints').checked = s.showHints !== false;
-  document.getElementById('room-opt-show-hints-row').style.display = (s.gameType==='othello'||s.gameType==='xiangqi'||s.gameType==='chess') ? '' : 'none';
+  document.getElementById('room-opt-show-hints-row').style.display = (s.gameType==='othello'||s.gameType==='xiangqi'||s.gameType==='chess'||s.gameType==='animalchess'||s.gameType==='shogi'||s.gameType==='checkers') ? '' : 'none';
+  document.getElementById('room-opt-king').checked = !!s.ccKing;
+  document.getElementById('room-opt-king-row').style.display = s.gameType==='checkers' ? '' : 'none';
 
   [document.getElementById('room-opt-wins'), document.getElementById('room-opt-time-mode'),
    document.getElementById('room-opt-time-custom'), document.getElementById('room-opt-first'),
-   document.getElementById('room-opt-forbidden'), document.getElementById('room-opt-show-hints')]
+   document.getElementById('room-opt-forbidden'), document.getElementById('room-opt-show-hints'),
+   document.getElementById('room-opt-king')]
    .forEach(el=>el.disabled = !amHost);
 }
 
@@ -538,12 +783,14 @@ window.saveRoomRules = async function() {
   const timeLimit  = getTimeLimitFromForm('room-opt');
   const firstPlayer= document.getElementById('room-opt-first').value;
   const forbiddenBlack = gt==='gomoku' && document.getElementById('room-opt-forbidden').checked;
-  const showHints = (gt==='othello'||gt==='xiangqi'||gt==='chess') ? document.getElementById('room-opt-show-hints').checked : (d.settings.showHints!==false);
+  const showHints = (gt==='othello'||gt==='xiangqi'||gt==='chess'||gt==='animalchess'||gt==='shogi'||gt==='checkers') ? document.getElementById('room-opt-show-hints').checked : (d.settings.showHints!==false);
+  const ccKing = gt==='checkers' && document.getElementById('room-opt-king').checked;
   if (winCount<1)  { roomRulesMsg('勝利局數須≥1', true); return; }
   const newSettings={...d.settings,gameType:gt,winCount,timeLimit,firstPlayer,forbiddenBlack,showHints};
   if (gt==='xiangqi') { newSettings.xqVariant = xqv; delete newSettings.boardSize; }
-  else if (gt==='connect4' || gt==='chess') { delete newSettings.boardSize; delete newSettings.xqVariant; }
+  else if (gt==='connect4' || gt==='chess' || gt==='animalchess' || gt==='shogi') { delete newSettings.boardSize; delete newSettings.xqVariant; }
   else { newSettings.boardSize = parseInt(document.getElementById('room-opt-size').value); delete newSettings.xqVariant; }
+  if (gt==='checkers') newSettings.ccKing = ccKing; else delete newSettings.ccKing;
   await update(roomRef,{settings:newSettings});
   roomRulesMsg('規則已更新！');
 };
@@ -560,6 +807,9 @@ window.startGame = async function() {
     else { initBoard=makeXiangqiStandardBoard(); extra.xqColor = firstPlayer==='black'?{black:'r',white:'b'}:{black:'b',white:'r'}; }
   } else if (s.gameType==='connect4') initBoard=Array(C4_COLS*C4_ROWS).fill(0);
   else if (s.gameType==='chess') initBoard=makeChessInitBoard();
+  else if (s.gameType==='animalchess') { initBoard=makeAnimalChessInitBoard(); extra.hand={black:{},white:{}}; }
+  else if (s.gameType==='shogi') { initBoard=makeShogiInitBoard(); extra.hand={black:{},white:{}}; }
+  else if (s.gameType==='checkers') { ccSetRadius(ccPiecesToRadius(s.boardSize)); initBoard=ccMakeInitBoard(s.ccKing); }
   else initBoard=Array(s.boardSize*s.boardSize).fill(0);
   await update(roomRef,{
     board:initBoard, status:'playing', currentTurn:firstPlayer, moveCount:0,
@@ -609,7 +859,9 @@ function syncState(d) {
   xqVariant = s.xqVariant||'standard';
   BSIZE    = s.boardSize||(gameType==='othello'?8:15);
   roomSettings = s;
-  xqSelR=-1; xqSelC=-1; xqSelMoves=[];
+  xqSelR=-1; xqSelC=-1; xqSelMoves=[]; handDropType=null; pendingMove=null;
+  lastRoomData = d;
+  const promoPrompt=document.getElementById('promo-prompt'); if (promoPrompt) promoPrompt.style.display='none';
 
   if (gameType==='othello') {
     CSIZE=OCSIZE; PAD=OPAD; STEP=OSTEP;
@@ -628,6 +880,19 @@ function syncState(d) {
     setCanvasSize(CH_W,CH_H);
     canvas.className='chess';
     document.getElementById('game-type-badge').textContent='西洋棋 · CHESS';
+  } else if (gameType==='animalchess') {
+    setCanvasSize(AC_W,AC_H);
+    canvas.className='animalchess';
+    document.getElementById('game-type-badge').textContent='動物將棋 · ANIMAL CHESS';
+  } else if (gameType==='shogi') {
+    setCanvasSize(SG_W,SG_H);
+    canvas.className='shogi';
+    document.getElementById('game-type-badge').textContent='將棋 · SHOGI';
+  } else if (gameType==='checkers') {
+    ccSetRadius(ccPiecesToRadius(s.boardSize));
+    setCanvasSize(CC_W,CC_H);
+    canvas.className='checkers';
+    document.getElementById('game-type-badge').textContent='跳棋 · CHECKERS';
   } else {
     CSIZE=GCSIZE; PAD=GPAD;
     STEP=(GCSIZE-GPAD*2)/(BSIZE-1);
@@ -638,7 +903,7 @@ function syncState(d) {
 
   localBoard=[];
   const flat=d.board||[];
-  if (gameType==='xiangqi' || gameType==='connect4' || gameType==='chess') {
+  if (gameType==='xiangqi' || gameType==='connect4' || gameType==='chess' || gameType==='animalchess' || gameType==='shogi' || gameType==='checkers') {
     localBoard = flat;
   } else if (gameType==='othello') {
     for(let r=0;r<BSIZE;r++){localBoard.push([]);for(let c=0;c<BSIZE;c++)localBoard[r].push(flat[r*BSIZE+c]||0);}
@@ -662,6 +927,8 @@ function syncState(d) {
 
   resizeCanvas();
   updateUI(d);
+  renderHandPanel(d);
+  renderCapturedPanel(d);
   render();
   updateRulesDisplay(s);
   if (gameOver) setTimeout(()=>showWin(d),450);
@@ -697,6 +964,21 @@ canvas.addEventListener('click', async e => {
     if (cell) await handleChessClick(cell[0], cell[1]);
     return;
   }
+  if (gameType==='animalchess') {
+    const cell = acCellFromXY(mx,my);
+    if (cell) await handleAnimalChessClick(cell[0], cell[1]);
+    return;
+  }
+  if (gameType==='shogi') {
+    const cell = sgCellFromXY(mx,my);
+    if (cell) await handleShogiClick(cell[0], cell[1]);
+    return;
+  }
+  if (gameType==='checkers') {
+    const idx = ccCellFromXY(mx,my);
+    if (idx>=0) await handleCheckersClick(idx);
+    return;
+  }
 
   const snap=await get(roomRef);
   const d=snap.val();
@@ -719,7 +1001,7 @@ canvas.addEventListener('click', async e => {
 });
 
 canvas.addEventListener('mousemove', e => {
-  if (gameOver || gameType==='xiangqi' || gameType==='chess') return;
+  if (gameOver || gameType==='xiangqi' || gameType==='chess' || gameType==='animalchess' || gameType==='shogi' || gameType==='checkers') return;
   const rect=canvas.getBoundingClientRect();
   const sx=logicalW/rect.width, sy=logicalH/rect.height;
   const mx=(e.clientX-rect.left)*sx, my=(e.clientY-rect.top)*sy;
@@ -1025,6 +1307,382 @@ async function handleChessClick(row,col){
   } else {
     const p=flat[row*CH_COLS+col];
     if(p && p[0]===myC){ xqSelR=row; xqSelC=col; xqSelMoves=chLegalMoves(flat,row,col); render(); }
+  }
+}
+
+// ══════════════════════════════════
+//  HAND / DROP SHARED HELPERS (Animal Chess, Shogi)
+// ══════════════════════════════════
+let lastRoomData = null;
+
+function renderHandPanel(d) {
+  const panel=document.getElementById('hand-panel');
+  if (!d || (gameType!=='animalchess' && gameType!=='shogi')) { panel.style.display='none'; return; }
+  panel.style.display='';
+  const nameTable = gameType==='animalchess' ? AC_NAME : SG_NAME;
+  const hand = d.hand || {black:{},white:{}};
+  const mine = hand[myColor]||{};
+  const oppSeat = myColor==='black'?'white':'black';
+  const opp = hand[oppSeat]||{};
+  const myTray=document.getElementById('my-hand-tray');
+  const oppTray=document.getElementById('opp-hand-tray');
+  const entries = Object.entries(mine).filter(([,n])=>n>0);
+  myTray.innerHTML = entries.length ? entries.map(([t,n])=>
+    `<button class="hand-piece-btn ${handDropType===t?'active':''}" onclick="selectHandDrop('${t}')">${nameTable[t]}×${n}</button>`
+  ).join('') : '<span class="hint-text" style="margin:0">（無）</span>';
+  const oppEntries = Object.entries(opp).filter(([,n])=>n>0);
+  oppTray.innerHTML = oppEntries.map(([t,n])=>`<span class="hand-piece-btn opp">${nameTable[t]}×${n}</span>`).join('');
+}
+
+// ══════════════════════════════════
+//  CAPTURED-PIECE TRAY (Xiangqi, Chess — display-only, no drop mechanic)
+// ══════════════════════════════════
+const XQ_INIT_COUNTS = {R:2,H:2,E:2,A:2,G:1,C:2,S:5};
+const CH_INIT_COUNTS = {K:1,Q:1,R:2,B:2,N:2,P:8};
+
+function renderCapturedPanel(d) {
+  const panel=document.getElementById('captured-panel');
+  const isXq = gameType==='xiangqi' && roomSettings.xqVariant!=='banqi';
+  const isCh = gameType==='chess';
+  if (!d || !(isXq || isCh)) { panel.style.display='none'; return; }
+  panel.style.display='';
+  const initCounts = isXq ? XQ_INIT_COUNTS : CH_INIT_COUNTS;
+  const nameTable = isXq ? XQ_NAME : CH_NAME;
+  const myC = isXq ? (myColor==='black'?'b':'r') : (myColor==='black'?'b':'w');
+  const oppC = isXq ? (myC==='b'?'r':'b') : (myC==='w'?'b':'w');
+  const flat = d.board||[];
+  const countOnBoard=(color)=>{
+    const counts={};
+    flat.forEach(p=>{ if(p && p[0]===color) counts[p[1]]=(counts[p[1]]||0)+1; });
+    return counts;
+  };
+  const buildCaptured=(color)=>{
+    const onBoard=countOnBoard(color);
+    const out=[];
+    Object.entries(initCounts).forEach(([t,n])=>{
+      const missing=n-(onBoard[t]||0);
+      if(missing>0) out.push([t,missing]);
+    });
+    return out;
+  };
+  const fmt=(arr,color)=>arr.map(([t,n])=>`<span class="hand-piece-btn opp">${nameTable[color][t]}×${n}</span>`).join('');
+  const myCaptures = buildCaptured(oppC);   // missing from opponent's side = pieces I captured
+  const oppCaptures = buildCaptured(myC);   // missing from my side = pieces opponent captured
+  document.getElementById('my-captured-tray').innerHTML = myCaptures.length ? fmt(myCaptures,oppC) : '<span class="hint-text" style="margin:0">（無）</span>';
+  document.getElementById('opp-captured-tray').innerHTML = oppCaptures.length ? fmt(oppCaptures,myC) : '<span class="hint-text" style="margin:0">（無）</span>';
+}
+
+window.selectHandDrop = function(type) {
+  if (!lastRoomData || lastRoomData.currentTurn!==myColor) return;
+  xqSelR=-1; xqSelC=-1;
+  if (handDropType===type) { handDropType=null; xqSelMoves=[]; render(); renderHandPanel(lastRoomData); return; }
+  handDropType = type;
+  const flat = lastRoomData.board || [];
+  const ROWS = gameType==='animalchess' ? AC_ROWS : SG_ROWS;
+  const COLS = gameType==='animalchess' ? AC_COLS : SG_COLS;
+  xqSelMoves=[];
+  for(let r=0;r<ROWS;r++) for(let c=0;c<COLS;c++) if(!flat[r*COLS+c]) xqSelMoves.push([r,c]);
+  render();
+  renderHandPanel(lastRoomData);
+};
+
+// ══════════════════════════════════
+//  ANIMAL CHESS (動物將棋) LOGIC
+// ══════════════════════════════════
+function makeAnimalChessInitBoard(){
+  const b=Array(AC_COLS*AC_ROWS).fill('');
+  const put=(r,c,v)=>{ b[r*AC_COLS+c]=v; };
+  put(0,0,'bG'); put(0,1,'bL'); put(0,2,'bE');
+  put(1,1,'bC');
+  put(2,1,'wC');
+  put(3,0,'wE'); put(3,1,'wL'); put(3,2,'wG');
+  return b;
+}
+
+function acCellFromXY(mx,my){
+  const col=Math.floor((mx-AC_PAD)/AC_STEPX), row=Math.floor((my-AC_PAD)/AC_STEPY);
+  if (col<0||col>=AC_COLS||row<0||row>=AC_ROWS) return null;
+  return boardFlipped() ? [AC_ROWS-1-row, AC_COLS-1-col] : [row,col];
+}
+function acInBounds(r,c){ return r>=0&&r<AC_ROWS&&c>=0&&c<AC_COLS; }
+
+function acLegalMoves(flat,r,c){
+  const p=flat[r*AC_COLS+c]; if(!p) return [];
+  const color=p[0], type=p[1];
+  const moves=[];
+  const tryAdd=(nr,nc)=>{
+    if(!acInBounds(nr,nc)) return;
+    const t=flat[nr*AC_COLS+nc];
+    if(!t || t[0]!==color) moves.push([nr,nc]);
+  };
+  if(type==='L'){
+    [[1,0],[-1,0],[0,1],[0,-1],[1,1],[1,-1],[-1,1],[-1,-1]].forEach(([dr,dc])=>tryAdd(r+dr,c+dc));
+  } else if(type==='G'){
+    [[1,0],[-1,0],[0,1],[0,-1]].forEach(([dr,dc])=>tryAdd(r+dr,c+dc));
+  } else if(type==='E'){
+    [[1,1],[1,-1],[-1,1],[-1,-1]].forEach(([dr,dc])=>tryAdd(r+dr,c+dc));
+  } else if(type==='C'){
+    const fwd = color==='b' ? 1 : -1;
+    tryAdd(r+fwd,c);
+  } else if(type==='H'){
+    const fwd = color==='b' ? 1 : -1;
+    [[fwd,0],[0,1],[0,-1],[fwd,1],[fwd,-1],[-fwd,0]].forEach(([dr,dc])=>tryAdd(r+dr,c+dc));
+  }
+  return moves;
+}
+
+async function handleAnimalChessClick(row,col){
+  const snap=await get(roomRef); const d=snap.val();
+  if (!d||d.status!=='playing') return;
+  if (d.currentTurn!==myColor) { showFlash('還沒輪到你'); return; }
+  const flat=d.board.slice();
+  const myC = myColor==='black'?'b':'w';
+  const oppSeat = myColor==='black'?'white':'black';
+  const curHand = d.hand || {black:{},white:{}};
+
+  if (handDropType) {
+    const idx=row*AC_COLS+col;
+    if (flat[idx]) { showFlash('不能下在這裡'); return; }
+    flat[idx]=myC+handDropType;
+    const newHand={...curHand, [myColor]:{...(curHand[myColor]||{})}};
+    newHand[myColor][handDropType]=(newHand[myColor][handDropType]||0)-1;
+    handDropType=null;
+    await update(roomRef,{board:flat,currentTurn:oppSeat,lastMove:{row,col,drop:true},moveCount:(d.moveCount||0)+1,timerStart:serverTimestamp(),hand:newHand});
+    return;
+  }
+
+  if(xqSelR>=0){
+    if(xqSelR===row && xqSelC===col){ xqSelR=-1;xqSelC=-1;xqSelMoves=[]; render(); return; }
+    const legal = xqSelMoves.some(([mr,mc])=>mr===row&&mc===col);
+    if(!legal){
+      const p=flat[row*AC_COLS+col];
+      if(p && p[0]===myC){ xqSelR=row; xqSelC=col; xqSelMoves=acLegalMoves(flat,row,col); render(); }
+      else showFlash('不能下在這裡');
+      return;
+    }
+    const fromIdx=xqSelR*AC_COLS+xqSelC, toIdx=row*AC_COLS+col;
+    const captured=flat[toIdx];
+    let moving=flat[fromIdx];
+    if (moving[1]==='C') {
+      const lastRow = moving[0]==='b' ? AC_ROWS-1 : 0;
+      if (row===lastRow) moving = moving[0]+'H';
+    }
+    flat[toIdx]=moving; flat[fromIdx]='';
+    const upd={board:flat, currentTurn:oppSeat, lastMove:{row,col,fromRow:xqSelR,fromCol:xqSelC}, moveCount:(d.moveCount||0)+1, timerStart:serverTimestamp()};
+    if(captured && captured[1]==='L'){
+      const newScores={...d.scores}; newScores[myColor]=(newScores[myColor]||0)+1;
+      const matchOver=newScores[myColor]>=(d.settings?.winCount||1);
+      Object.assign(upd,{status:'over',winner:myColor,winnerName:nickname,scores:newScores,matchOver});
+    } else if (captured) {
+      const base = captured[1]==='H' ? 'C' : captured[1];
+      const newHand={...curHand, [myColor]:{...(curHand[myColor]||{})}};
+      newHand[myColor][base]=(newHand[myColor][base]||0)+1;
+      upd.hand=newHand;
+    }
+    xqSelR=-1;xqSelC=-1;xqSelMoves=[];
+    await update(roomRef,upd);
+  } else {
+    const p=flat[row*AC_COLS+col];
+    if(p && p[0]===myC){ xqSelR=row; xqSelC=col; xqSelMoves=acLegalMoves(flat,row,col); render(); }
+  }
+}
+
+// ══════════════════════════════════
+//  SHOGI (將棋) LOGIC
+// ══════════════════════════════════
+function makeShogiInitBoard(){
+  const b=Array(SG_COLS*SG_ROWS).fill('');
+  const back=['L','N','S','G','K','G','S','N','L'];
+  back.forEach((t,c)=>{ b[0*SG_COLS+c]='b'+t; b[8*SG_COLS+c]='w'+t; });
+  for(let c=0;c<SG_COLS;c++){ b[2*SG_COLS+c]='bP'; b[6*SG_COLS+c]='wP'; }
+  b[1*SG_COLS+1]='bR'; b[1*SG_COLS+7]='bB';
+  b[7*SG_COLS+1]='wB'; b[7*SG_COLS+7]='wR';
+  return b;
+}
+
+function sgCellFromXY(mx,my){
+  const col=Math.floor((mx-SG_PAD)/SG_STEPX), row=Math.floor((my-SG_PAD)/SG_STEPY);
+  if (col<0||col>=SG_COLS||row<0||row>=SG_ROWS) return null;
+  return boardFlipped() ? [SG_ROWS-1-row, SG_COLS-1-col] : [row,col];
+}
+function sgInBounds(r,c){ return r>=0&&r<SG_ROWS&&c>=0&&c<SG_COLS; }
+function sgInPromoZone(color,r){ return color==='b' ? r<=2 : r>=6; }
+
+function sgLegalMoves(flat,r,c){
+  const p=flat[r*SG_COLS+c]; if(!p) return [];
+  const color=p[0], type=p[1];
+  const moves=[];
+  const tryAdd=(nr,nc)=>{
+    if(!sgInBounds(nr,nc)) return;
+    const t=flat[nr*SG_COLS+nc];
+    if(!t || t[0]!==color) moves.push([nr,nc]);
+  };
+  const slide=(dirs)=>{
+    dirs.forEach(([dr,dc])=>{
+      let nr=r+dr,nc=c+dc;
+      while(sgInBounds(nr,nc)){
+        const t=flat[nr*SG_COLS+nc];
+        if(!t) moves.push([nr,nc]);
+        else { if(t[0]!==color) moves.push([nr,nc]); break; }
+        nr+=dr; nc+=dc;
+      }
+    });
+  };
+  const fwd = color==='b' ? 1 : -1;
+
+  if(type==='K'){
+    [[1,0],[-1,0],[0,1],[0,-1],[1,1],[1,-1],[-1,1],[-1,-1]].forEach(([dr,dc])=>tryAdd(r+dr,c+dc));
+  } else if(SG_GOLDLIKE.includes(type)){
+    [[fwd,0],[fwd,1],[fwd,-1],[0,1],[0,-1],[-fwd,0]].forEach(([dr,dc])=>tryAdd(r+dr,c+dc));
+  } else if(type==='S'){
+    [[fwd,0],[fwd,1],[fwd,-1],[-fwd,1],[-fwd,-1]].forEach(([dr,dc])=>tryAdd(r+dr,c+dc));
+  } else if(type==='N'){
+    [[fwd*2,1],[fwd*2,-1]].forEach(([dr,dc])=>tryAdd(r+dr,c+dc));
+  } else if(type==='L'){
+    slide([[fwd,0]]);
+  } else if(type==='P'){
+    tryAdd(r+fwd,c);
+  } else if(type==='R'){
+    slide([[1,0],[-1,0],[0,1],[0,-1]]);
+  } else if(type==='B'){
+    slide([[1,1],[1,-1],[-1,1],[-1,-1]]);
+  } else if(type==='D'){
+    slide([[1,0],[-1,0],[0,1],[0,-1]]);
+    [[1,1],[1,-1],[-1,1],[-1,-1]].forEach(([dr,dc])=>tryAdd(r+dr,c+dc));
+  } else if(type==='H'){
+    slide([[1,1],[1,-1],[-1,1],[-1,-1]]);
+    [[1,0],[-1,0],[0,1],[0,-1]].forEach(([dr,dc])=>tryAdd(r+dr,c+dc));
+  }
+  return moves;
+}
+
+async function finalizeShogiMove(d, flat, fromIdx, toIdx, row, col, fromRow, fromCol, curHand, promote){
+  const moving0=flat[fromIdx];
+  const moving = promote ? moving0[0]+SG_PROMOTE[moving0[1]] : moving0;
+  const captured=flat[toIdx];
+  flat[toIdx]=moving; flat[fromIdx]='';
+  const nextTurn = myColor==='black'?'white':'black';
+  const upd={board:flat, currentTurn:nextTurn, lastMove:{row,col,fromRow,fromCol}, moveCount:(d.moveCount||0)+1, timerStart:serverTimestamp()};
+  if(captured && captured[1]==='K'){
+    const newScores={...d.scores}; newScores[myColor]=(newScores[myColor]||0)+1;
+    const matchOver=newScores[myColor]>=(d.settings?.winCount||1);
+    Object.assign(upd,{status:'over',winner:myColor,winnerName:nickname,scores:newScores,matchOver});
+  } else if (captured) {
+    const base = SG_DEMOTE[captured[1]] || captured[1];
+    const newHand={...curHand, [myColor]:{...(curHand[myColor]||{})}};
+    newHand[myColor][base]=(newHand[myColor][base]||0)+1;
+    upd.hand=newHand;
+  }
+  await update(roomRef,upd);
+}
+
+window.confirmPromote = async function(yes) {
+  document.getElementById('promo-prompt').style.display='none';
+  if (!pendingMove) return;
+  const {d,flat,fromIdx,toIdx,row,col,fromRow,fromCol,curHand} = pendingMove;
+  pendingMove=null;
+  await finalizeShogiMove(d,flat,fromIdx,toIdx,row,col,fromRow,fromCol,curHand,yes);
+};
+
+async function handleShogiClick(row,col){
+  const snap=await get(roomRef); const d=snap.val();
+  if (!d||d.status!=='playing') return;
+  if (d.currentTurn!==myColor) { showFlash('還沒輪到你'); return; }
+  const flat=d.board.slice();
+  const myC = myColor==='black'?'b':'w';
+  const oppSeat = myColor==='black'?'white':'black';
+  const curHand = d.hand || {black:{},white:{}};
+
+  if (handDropType) {
+    const idx=row*SG_COLS+col;
+    if (flat[idx]) { showFlash('不能下在這裡'); return; }
+    flat[idx]=myC+handDropType;
+    const newHand={...curHand, [myColor]:{...(curHand[myColor]||{})}};
+    newHand[myColor][handDropType]=(newHand[myColor][handDropType]||0)-1;
+    handDropType=null;
+    await update(roomRef,{board:flat,currentTurn:oppSeat,lastMove:{row,col,drop:true},moveCount:(d.moveCount||0)+1,timerStart:serverTimestamp(),hand:newHand});
+    return;
+  }
+
+  if(xqSelR>=0){
+    if(xqSelR===row && xqSelC===col){ xqSelR=-1;xqSelC=-1;xqSelMoves=[]; render(); return; }
+    const legal = xqSelMoves.some(([mr,mc])=>mr===row&&mc===col);
+    if(!legal){
+      const p=flat[row*SG_COLS+col];
+      if(p && p[0]===myC){ xqSelR=row; xqSelC=col; xqSelMoves=sgLegalMoves(flat,row,col); render(); }
+      else showFlash('不能下在這裡');
+      return;
+    }
+    const fromIdx=xqSelR*SG_COLS+xqSelC, toIdx=row*SG_COLS+col;
+    const fromRow=xqSelR, fromCol=xqSelC;
+    const moving=flat[fromIdx], color=moving[0], type=moving[1];
+    const canPromote = !!SG_PROMOTE[type] && (sgInPromoZone(color,fromRow) || sgInPromoZone(color,row));
+    xqSelR=-1; xqSelC=-1; xqSelMoves=[];
+    if (canPromote) {
+      pendingMove = {d, flat, fromIdx, toIdx, row, col, fromRow, fromCol, curHand};
+      localBoard = flat; render();
+      document.getElementById('promo-prompt').style.display='';
+      return;
+    }
+    await finalizeShogiMove(d, flat, fromIdx, toIdx, row, col, fromRow, fromCol, curHand, false);
+  } else {
+    const p=flat[row*SG_COLS+col];
+    if(p && p[0]===myC){ xqSelR=row; xqSelC=col; xqSelMoves=sgLegalMoves(flat,row,col); render(); }
+  }
+}
+
+// ══════════════════════════════════
+//  CHINESE CHECKERS (跳棋／彈珠跳棋, 3-player) LOGIC
+// ══════════════════════════════════
+let ccSelIdx=-1, ccSelMoves=[];
+
+function ccCellFromXY(mx,my){
+  ccBuildBoard();
+  let best=-1, bestD=Infinity;
+  for(let i=0;i<CC_CELLS.length;i++){
+    const [x,y]=ccDisplayXY(i);
+    const dx=mx-x, dy=my-y, dist2=dx*dx+dy*dy;
+    if (dist2<bestD) { bestD=dist2; best=i; }
+  }
+  const tol=CC_CELL*0.55;
+  return bestD<=tol*tol ? best : -1;
+}
+
+function ccSeatOrder(){ return ['black','white','p3']; }
+function ccNextSeat(seat){
+  const order=ccSeatOrder();
+  return order[(order.indexOf(seat)+1)%3];
+}
+
+async function handleCheckersClick(idx){
+  if (idx<0) return;
+  const snap=await get(roomRef); const d=snap.val();
+  if (!d||d.status!=='playing') return;
+  if (d.currentTurn!==myColor) { showFlash('還沒輪到你'); return; }
+  const flat=d.board.slice();
+
+  const kingMode=!!d.settings?.ccKing;
+  if (ccSelIdx>=0){
+    if (ccSelIdx===idx){ ccSelIdx=-1;ccSelMoves=[]; render(); return; }
+    const legal=ccSelMoves.includes(idx);
+    if (!legal){
+      if (ccSeatOf(flat[idx])===myColor){ ccSelIdx=idx; ccSelMoves=ccLegalMoves(flat,idx); render(); }
+      else showFlash('不能下在這裡');
+      return;
+    }
+    const fromIdx=ccSelIdx;
+    flat[idx]=flat[fromIdx]; flat[fromIdx]='';
+    const nextTurn=ccNextSeat(myColor);
+    const upd={board:flat,currentTurn:nextTurn,lastMove:{idx,fromIdx},moveCount:(d.moveCount||0)+1,timerStart:serverTimestamp()};
+    if (ccHasWon(flat,myColor,kingMode)){
+      const newScores={...d.scores}; newScores[myColor]=(newScores[myColor]||0)+1;
+      const matchOver=newScores[myColor]>=(d.settings?.winCount||1);
+      Object.assign(upd,{status:'over',winner:myColor,winnerName:nickname,scores:newScores,matchOver});
+    }
+    ccSelIdx=-1; ccSelMoves=[];
+    await update(roomRef,upd);
+  } else {
+    if (ccSeatOf(flat[idx])===myColor){ ccSelIdx=idx; ccSelMoves=ccLegalMoves(flat,idx); render(); }
   }
 }
 
@@ -1346,14 +2004,25 @@ function updateUI(d) {
   document.getElementById('name-white').textContent=wname;
   const isXq = gameType==='xiangqi';
   const blackFirst = (s.firstPlayer||'black')==='black';
-  document.getElementById('plabel-black').textContent = (blackFirst?'先手 · ':'後手 · ')+'BLACK';
-  document.getElementById('plabel-white').textContent = (blackFirst?'後手 · ':'先手 · ')+(isXq?'RED':'WHITE');
-  document.getElementById('stone-dot-white').className = 'stone-dot ' + (isXq?'red':'white');
-  document.getElementById('my-color-badge').textContent=myColor==='black'?`你是 ● 黑方`:(isXq?`你是 ○ 紅方`:`你是 ○ 白方`);
+  const isCheckers = gameType==='checkers';
+  document.getElementById('plabel-black').textContent = isCheckers ? '紅方 · RED' : (blackFirst?'先手 · ':'後手 · ')+'BLACK';
+  document.getElementById('plabel-white').textContent = isCheckers ? '黃方 · YELLOW' : (blackFirst?'後手 · ':'先手 · ')+(isXq?'RED':'WHITE');
+  document.getElementById('stone-dot-black').className = 'stone-dot ' + (isCheckers?'ccred':'black');
+  document.getElementById('stone-dot-white').className = 'stone-dot ' + (isCheckers?'ccyellow':isXq?'red':'white');
+  document.getElementById('card-p3').style.display = isCheckers ? '' : 'none';
+  if (isCheckers) {
+    document.getElementById('name-p3').textContent = d.p3?.name||'第三家';
+    document.getElementById('score-p3').textContent = d.scores?.p3||0;
+    document.getElementById('card-p3').classList.toggle('active', d.currentTurn==='p3'&&!gameOver);
+  }
+  document.getElementById('my-color-badge').textContent = isCheckers
+    ? (myColor==='black'?'你是 ● 紅方':myColor==='white'?'你是 ● 黃方':'你是 ● 綠方')
+    : myColor==='black'?`你是 ● 黑方`:(isXq?`你是 ○ 紅方`:`你是 ○ 白方`);
   document.getElementById('card-black').classList.toggle('active',d.currentTurn==='black'&&!gameOver);
   document.getElementById('card-white').classList.toggle('active',d.currentTurn==='white'&&!gameOver);
+  const turnName = d.currentTurn==='black'?bname:d.currentTurn==='white'?wname:(d.p3?.name||'第三家');
   document.getElementById('turn-display').textContent=
-    d.status==='over'?'對局結束':isMyTurn?'輪到你落子 ✦':d.currentTurn==='black'?`${bname} 落子中…`:`${wname} 落子中…`;
+    d.status==='over'?'對局結束':isMyTurn?'輪到你落子 ✦':`${turnName} 落子中…`;
   document.getElementById('stat-moves').textContent=d.moveCount||0;
   document.getElementById('stat-room').textContent=roomId||'—';
   document.getElementById('score-black').textContent=d.scores?.black||0;
@@ -1381,13 +2050,17 @@ function updateUI(d) {
 }
 
 function updateRulesDisplay(s) {
-  const gt = s.gameType==='othello' ? '黑白棋' : s.gameType==='xiangqi' ? (s.xqVariant==='banqi'?'暗棋':'象棋（大盤）') : s.gameType==='connect4' ? '四子棋' : s.gameType==='chess' ? '西洋棋' : '五子棋';
+  const gt = s.gameType==='othello' ? '黑白棋' : s.gameType==='xiangqi' ? (s.xqVariant==='banqi'?'暗棋':'象棋（大盤）') : s.gameType==='connect4' ? '四子棋' : s.gameType==='chess' ? '西洋棋' : s.gameType==='animalchess' ? '動物將棋' : s.gameType==='shogi' ? '將棋' : s.gameType==='checkers' ? '跳棋（三人）' : '五子棋';
   const lines=[`• ${gt}`];
   if (s.gameType==='xiangqi') lines.push(`• ${s.xqVariant==='banqi'?'4×8':'9×10'} 棋盤`);
   else if (s.gameType==='connect4') lines.push('• 7×6 棋盤');
   else if (s.gameType==='chess') lines.push('• 8×8 棋盤');
+  else if (s.gameType==='animalchess') lines.push('• 3×4 棋盤');
+  else if (s.gameType==='shogi') lines.push('• 9×9 棋盤');
+  else if (s.gameType==='checkers') lines.push(`• 每人 ${s.boardSize||10} 子（六角星棋盤）`);
   else lines.push(`• ${s.boardSize}×${s.boardSize} 棋盤`);
-  lines.push(`• ${s.firstPlayer==='black'?'黑':'白'}方先行`,`• ${Math.ceil(s.winCount||1)} 勝制`,`• 限時：${s.timeLimit?s.timeLimit+'秒/步':'無限制'}`);
+  if (s.gameType!=='checkers') lines.push(`• ${s.firstPlayer==='black'?'黑':'白'}方先行`);
+  lines.push(`• ${Math.ceil(s.winCount||1)} 勝制`,`• 限時：${s.timeLimit?s.timeLimit+'秒/步':'無限制'}`);
   if(s.gameType==='gomoku') lines.push(`• 禁手：${s.forbiddenBlack?'黑方三三/四四':'無'}`);
   document.getElementById('rules-display').innerHTML=lines.join('<br>');
 }
@@ -1414,7 +2087,9 @@ function showWin(d) {
   } else {
     resetBtn.style.display='';
     resetBtn.disabled=true;
-    resetBtn.textContent=`比分 ${sc.black||0}:${sc.white||0}，準備下一局…`;
+    resetBtn.textContent = gameType==='checkers'
+      ? `比分 ${sc.black||0}:${sc.white||0}:${sc.p3||0}，準備下一局…`
+      : `比分 ${sc.black||0}:${sc.white||0}，準備下一局…`;
   }
   document.getElementById('win-overlay').classList.add('visible');
 }
@@ -1434,6 +2109,9 @@ function render() {
   else if(gameType==='xiangqi') renderXiangqi();
   else if(gameType==='connect4') renderConnect4();
   else if(gameType==='chess') renderChess();
+  else if(gameType==='animalchess') renderAnimalChess();
+  else if(gameType==='shogi') renderShogi();
+  else if(gameType==='checkers') renderCheckers();
   else renderGomoku();
 }
 
@@ -1761,6 +2439,259 @@ function renderChess(){
   }
 }
 
+/* ─── ANIMAL CHESS (動物將棋) RENDER ─── */
+function acXY(c,r){ return [AC_PAD+c*AC_STEPX+AC_STEPX/2, AC_PAD+r*AC_STEPY+AC_STEPY/2]; }
+
+function drawAcBoard(){
+  const grad=ctx.createLinearGradient(0,0,0,AC_H);
+  grad.addColorStop(0,'#f3e0b3'); grad.addColorStop(1,'#dcb978');
+  ctx.fillStyle=grad; ctx.fillRect(0,0,AC_W,AC_H);
+  // soft alternating cell tint for a checkerboard feel
+  for(let r=0;r<AC_ROWS;r++) for(let c=0;c<AC_COLS;c++){
+    if((r+c)%2===0) continue;
+    ctx.fillStyle='rgba(107,74,32,.07)';
+    ctx.fillRect(AC_PAD+c*AC_STEPX, AC_PAD+r*AC_STEPY, AC_STEPX, AC_STEPY);
+  }
+  ctx.strokeStyle='rgba(107,74,32,.55)'; ctx.lineWidth=1.5;
+  for(let r=0;r<=AC_ROWS;r++){ const y=AC_PAD+r*AC_STEPY; ctx.beginPath();ctx.moveTo(AC_PAD,y);ctx.lineTo(AC_W-AC_PAD,y);ctx.stroke(); }
+  for(let c=0;c<=AC_COLS;c++){ const x=AC_PAD+c*AC_STEPX; ctx.beginPath();ctx.moveTo(x,AC_PAD);ctx.lineTo(x,AC_H-AC_PAD);ctx.stroke(); }
+  ctx.strokeStyle='#3a2412'; ctx.lineWidth=2.5; ctx.strokeRect(AC_PAD,AC_PAD,AC_STEPX*AC_COLS,AC_STEPY*AC_ROWS);
+  drawVignette(AC_W,AC_H);
+}
+
+// Inherent movement pattern per piece type (board-direction terms, not
+// filtered by legality) — drawn as dots around the piece rim so the
+// physical "which way can this move" markers from the real game show up here.
+function acMoveDirs(color,type){
+  const fwd = color==='b' ? 1 : -1;
+  if(type==='L') return [[1,0],[-1,0],[0,1],[0,-1],[1,1],[1,-1],[-1,1],[-1,-1]];
+  if(type==='G') return [[1,0],[-1,0],[0,1],[0,-1]];
+  if(type==='E') return [[1,1],[1,-1],[-1,1],[-1,-1]];
+  if(type==='C') return [[fwd,0]];
+  if(type==='H') return [[fwd,0],[0,1],[0,-1],[fwd,1],[fwd,-1],[-fwd,0]];
+  return [];
+}
+
+function drawAcPiece(r,c,p){
+  const [fr,fc]=acFlip(r,c);
+  const [x,y]=acXY(fc,fr), color=p[0], type=p[1];
+  const rad=Math.min(AC_STEPX,AC_STEPY)*0.42;
+  ctx.save();
+  ctx.shadowColor='rgba(0,0,0,.45)'; ctx.shadowBlur=5; ctx.shadowOffsetY=2;
+  ctx.beginPath(); ctx.arc(x,y,rad,0,Math.PI*2);
+  const g=ctx.createRadialGradient(x-rad*.3,y-rad*.35,rad*.1,x,y,rad);
+  if(color==='w'){ g.addColorStop(0,'#fffaf0'); g.addColorStop(1,'#dcc89a'); }
+  else { g.addColorStop(0,'#4a4a4a'); g.addColorStop(1,'#121212'); }
+  ctx.fillStyle=g; ctx.fill();
+  ctx.shadowBlur=0; ctx.shadowOffsetY=0;
+  ctx.lineWidth=2; ctx.strokeStyle = color==='w' ? '#8a6a3a' : '#000';
+  ctx.stroke();
+
+  const flip=boardFlipped();
+  ctx.fillStyle = color==='w' ? 'rgba(138,106,58,.9)' : 'rgba(232,207,150,.9)';
+  acMoveDirs(color,type).forEach(([dr,dc])=>{
+    const ddr=flip?-dr:dr, ddc=flip?-dc:dc;
+    const len=Math.hypot(ddr,ddc);
+    const dx=x+(ddc/len)*rad*0.84, dy=y+(ddr/len)*rad*0.84;
+    ctx.beginPath(); ctx.arc(dx,dy,rad*0.12,0,Math.PI*2); ctx.fill();
+  });
+
+  ctx.font=`bold ${Math.floor(rad*1.1)}px Noto Serif TC`;
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillStyle = color==='w' ? '#1c1812' : '#f5f0e6';
+  ctx.fillText(AC_NAME[type], x, y+1);
+  ctx.restore();
+}
+
+function renderAnimalChess(){
+  drawAcBoard();
+  for(let r=0;r<AC_ROWS;r++) for(let c=0;c<AC_COLS;c++){
+    const p=localBoard[r*AC_COLS+c];
+    if(p) drawAcPiece(r,c,p);
+  }
+  if(xqSelR>=0){
+    const [fr,fc]=acFlip(xqSelR,xqSelC);
+    const a=pulseAlpha();
+    ctx.strokeStyle=`rgba(255,210,60,${0.7+0.3*a})`;ctx.lineWidth=3;
+    ctx.strokeRect(AC_PAD+fc*AC_STEPX+2, AC_PAD+fr*AC_STEPY+2, AC_STEPX-4, AC_STEPY-4);
+  }
+  if (roomSettings.showHints!==false) xqSelMoves.forEach(([r,c])=>{
+    const [fr,fc]=acFlip(r,c);
+    const [x,y]=acXY(fc,fr);
+    const a=pulseAlpha();
+    ctx.fillStyle=`rgba(80,200,100,${0.4+0.3*a})`;
+    ctx.beginPath();ctx.arc(x,y,5+2*a,0,Math.PI*2);ctx.fill();
+  });
+  if(lastMove){
+    const [flr,flc]=acFlip(lastMove.row,lastMove.col);
+    const age=moveAge();
+    ctx.save(); ctx.globalAlpha=0.5+0.5*(1-age);
+    ctx.strokeStyle='rgba(255,120,40,0.9)';ctx.lineWidth=2;
+    ctx.strokeRect(AC_PAD+flc*AC_STEPX+2, AC_PAD+flr*AC_STEPY+2, AC_STEPX-4, AC_STEPY-4);
+    ctx.restore();
+  }
+}
+
+/* ─── SHOGI (將棋) RENDER ─── */
+function sgXY(c,r){ return [SG_PAD+c*SG_STEPX+SG_STEPX/2, SG_PAD+r*SG_STEPY+SG_STEPY/2]; }
+
+function drawSgBoard(){
+  ctx.fillStyle='#e8cf96'; ctx.fillRect(0,0,SG_W,SG_H);
+  ctx.strokeStyle='#6b4a20'; ctx.lineWidth=1.2;
+  for(let r=0;r<=SG_ROWS;r++){ const y=SG_PAD+r*SG_STEPY; ctx.beginPath();ctx.moveTo(SG_PAD,y);ctx.lineTo(SG_W-SG_PAD,y);ctx.stroke(); }
+  for(let c=0;c<=SG_COLS;c++){ const x=SG_PAD+c*SG_STEPX; ctx.beginPath();ctx.moveTo(x,SG_PAD);ctx.lineTo(x,SG_H-SG_PAD);ctx.stroke(); }
+  ctx.strokeStyle='#3a2412'; ctx.lineWidth=2; ctx.strokeRect(SG_PAD,SG_PAD,SG_STEPX*SG_COLS,SG_STEPY*SG_ROWS);
+  drawVignette(SG_W,SG_H);
+}
+
+function drawSgPiece(r,c,p){
+  const [fr,fc]=sgFlip(r,c);
+  const [x,y]=sgXY(fc,fr), color=p[0], type=p[1];
+  const isPromoted = !!SG_DEMOTE[type];
+  ctx.save();
+  if (color==='b') { ctx.translate(x,y); ctx.rotate(Math.PI); ctx.translate(-x,-y); }
+  const hw=SG_STEPX*0.4, hh=SG_STEPY*0.46;
+  ctx.beginPath();
+  ctx.moveTo(x,y-hh); ctx.lineTo(x+hw,y-hh*0.3); ctx.lineTo(x+hw*0.8,y+hh); ctx.lineTo(x-hw*0.8,y+hh); ctx.lineTo(x-hw,y-hh*0.3);
+  ctx.closePath();
+  ctx.fillStyle='#eed9a8'; ctx.fill();
+  ctx.lineWidth=1.5; ctx.strokeStyle='#5a3c1a'; ctx.stroke();
+  ctx.font=`bold ${Math.floor(Math.min(SG_STEPX,SG_STEPY)*0.42)}px Noto Serif TC`;
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillStyle = isPromoted ? '#b3392c' : '#2a2a2a';
+  ctx.fillText(SG_NAME[type], x, y+1);
+  ctx.restore();
+}
+
+function renderShogi(){
+  drawSgBoard();
+  for(let r=0;r<SG_ROWS;r++) for(let c=0;c<SG_COLS;c++){
+    const p=localBoard[r*SG_COLS+c];
+    if(p) drawSgPiece(r,c,p);
+  }
+  if(xqSelR>=0){
+    const [fr,fc]=sgFlip(xqSelR,xqSelC);
+    const a=pulseAlpha();
+    ctx.strokeStyle=`rgba(255,210,60,${0.7+0.3*a})`;ctx.lineWidth=3;
+    ctx.strokeRect(SG_PAD+fc*SG_STEPX+2, SG_PAD+fr*SG_STEPY+2, SG_STEPX-4, SG_STEPY-4);
+  }
+  if (roomSettings.showHints!==false) xqSelMoves.forEach(([r,c])=>{
+    const [fr,fc]=sgFlip(r,c);
+    const [x,y]=sgXY(fc,fr);
+    const a=pulseAlpha();
+    ctx.fillStyle=`rgba(80,200,100,${0.4+0.3*a})`;
+    ctx.beginPath();ctx.arc(x,y,5+2*a,0,Math.PI*2);ctx.fill();
+  });
+  if(lastMove){
+    const [flr,flc]=sgFlip(lastMove.row,lastMove.col);
+    const age=moveAge();
+    ctx.save(); ctx.globalAlpha=0.5+0.5*(1-age);
+    ctx.strokeStyle='rgba(255,120,40,0.9)';ctx.lineWidth=2;
+    ctx.strokeRect(SG_PAD+flc*SG_STEPX+2, SG_PAD+flr*SG_STEPY+2, SG_STEPX-4, SG_STEPY-4);
+    ctx.restore();
+  }
+}
+
+/* ─── CHINESE CHECKERS (跳棋) RENDER ─── */
+function ccSeatTint(seat){
+  if(seat==='black') return '#ff4632';   // 紅
+  if(seat==='white') return '#ffdc32';   // 黃
+  return '#3ddc5a';                       // 綠
+}
+
+function drawCcBoard(){
+  ccBuildBoard();
+  ctx.fillStyle='#2a1c10'; ctx.fillRect(0,0,CC_W,CC_H);
+
+  // mesh lines connecting every pair of adjacent points, like a real board
+  ctx.strokeStyle='rgba(212,169,74,.45)'; ctx.lineWidth=1;
+  CC_CELLS.forEach((c,i)=>{
+    const [x1,y1]=ccDisplayXY(i);
+    CC_DIRS.forEach(([dq,dr])=>{
+      const j=ccIdxAt(c.q+dq, c.r+dr);
+      if (j>i){
+        const [x2,y2]=ccDisplayXY(j);
+        ctx.beginPath(); ctx.moveTo(x1,y1); ctx.lineTo(x2,y2); ctx.stroke();
+      }
+    });
+  });
+
+  const r=CC_CELL*0.42;
+  // Diamond Game (鑽石跳棋) colors a corner AND its opposite corner the same
+  // color, marking out each player's home/target "lane" in one consistent hue.
+  const cornerSeat={};
+  Object.entries(CC_SEAT_CORNER).forEach(([seat,corner])=>{
+    cornerSeat[corner]=seat;
+    cornerSeat[(corner+3)%6]=seat;
+  });
+  const myHome = (myColor && myColor in CC_SEAT_CORNER) ? CC_SEAT_CORNER[myColor] : -1;
+  const myTarget = myHome>=0 ? (myHome+3)%6 : -1;
+  const kingApex = (roomSettings.ccKing && myTarget>=0) ? ccApexCell(myTarget) : -1;
+  CC_CELLS.forEach((c,i)=>{
+    const [x,y]=ccDisplayXY(i);
+    const owner = cornerSeat[c.corner];
+    ctx.beginPath(); ctx.arc(x,y, owner?r*1.15:r, 0, Math.PI*2);
+    ctx.fillStyle = owner ? ccSeatTint(owner) : 'rgba(238,228,200,.42)';
+    ctx.fill();
+    ctx.lineWidth = owner?1.5:1; ctx.strokeStyle = owner?'rgba(0,0,0,.4)':'rgba(180,160,120,.3)'; ctx.stroke();
+    if (i===kingApex){
+      ctx.save();
+      ctx.lineWidth=2.5; ctx.strokeStyle='rgba(255,210,60,.95)';
+      ctx.beginPath(); ctx.arc(x,y,r*1.15+4,0,Math.PI*2); ctx.stroke();
+      ctx.restore();
+    }
+  });
+  drawVignette(CC_W,CC_H);
+}
+
+function drawCcPiece(idx){
+  const cell=localBoard[idx], seat=ccSeatOf(cell);
+  const [x,y]=ccDisplayXY(idx), rad=CC_CELL*0.48;
+  ctx.save();
+  ctx.shadowColor='rgba(0,0,0,.6)'; ctx.shadowBlur=8; ctx.shadowOffsetY=4;
+  ctx.beginPath(); ctx.arc(x,y,rad,0,Math.PI*2);
+  const g=ctx.createRadialGradient(x-rad*.3,y-rad*.3,rad*.1,x,y,rad);
+  if(seat==='black'){ g.addColorStop(0,'#ff8a7a');g.addColorStop(1,'#9a200f'); }       // 紅
+  else if(seat==='white'){ g.addColorStop(0,'#fff09a');g.addColorStop(1,'#c08e00'); }  // 黃
+  else { g.addColorStop(0,'#8af09a');g.addColorStop(1,'#157028'); }                    // 綠
+  ctx.fillStyle=g; ctx.fill();
+  ctx.shadowBlur=0; ctx.shadowOffsetY=0;
+  ctx.lineWidth=2; ctx.strokeStyle='rgba(0,0,0,.55)'; ctx.stroke();
+  ctx.lineWidth=1; ctx.strokeStyle='rgba(255,255,255,.5)';
+  ctx.beginPath(); ctx.arc(x,y,rad-1.5,0,Math.PI*2); ctx.stroke();
+  if (ccIsKingCell(cell)){
+    ctx.fillStyle='#fff'; ctx.font=`bold ${Math.round(rad*1.1)}px sans-serif`;
+    ctx.textAlign='center'; ctx.textBaseline='middle';
+    ctx.fillText('王', x, y+1);
+  }
+  ctx.restore();
+}
+
+function renderCheckers(){
+  drawCcBoard();
+  for(let i=0;i<localBoard.length;i++) if(localBoard[i]) drawCcPiece(i);
+  if (ccSelIdx>=0){
+    const [x,y]=ccDisplayXY(ccSelIdx);
+    const a=pulseAlpha();
+    ctx.strokeStyle=`rgba(255,210,60,${0.7+0.3*a})`;ctx.lineWidth=3;
+    ctx.beginPath();ctx.arc(x,y,CC_CELL*0.46,0,Math.PI*2);ctx.stroke();
+  }
+  if (roomSettings.showHints!==false) ccSelMoves.forEach(i=>{
+    const [x,y]=ccDisplayXY(i);
+    const a=pulseAlpha();
+    ctx.fillStyle=`rgba(80,200,100,${0.4+0.3*a})`;
+    ctx.beginPath();ctx.arc(x,y,5+2*a,0,Math.PI*2);ctx.fill();
+  });
+  if (lastMove && lastMove.idx!=null && CC_CELLS[lastMove.idx]){
+    const [x,y]=ccDisplayXY(lastMove.idx);
+    const age=moveAge();
+    ctx.save(); ctx.globalAlpha=0.5+0.5*(1-age);
+    ctx.strokeStyle='rgba(255,120,40,0.9)';ctx.lineWidth=2;
+    ctx.beginPath();ctx.arc(x,y,CC_CELL*0.5,0,Math.PI*2);ctx.stroke();
+    ctx.restore();
+  }
+}
+
 /* ─── XIANGQI (大盤) RENDER ─── */
 function xqXY(c,r){ return [XQ_PAD+c*XQ_STEPX, XQ_PAD+r*XQ_STEPY]; }
 
@@ -1997,7 +2928,10 @@ select option{background:#221c14;color:var(--text)}
 .stone-dot{width:40px;height:40px;border-radius:50%;margin-bottom:.6rem}
 .stone-dot.black{background:radial-gradient(circle at 35% 35%,#555,#111);box-shadow:inset -2px -2px 5px rgba(0,0,0,.8)}
 .stone-dot.white{background:radial-gradient(circle at 35% 35%,#fff,#d8cfc0);box-shadow:inset -2px -2px 5px rgba(0,0,0,.2)}
+.stone-dot.p3{background:radial-gradient(circle at 35% 35%,#6bdb7a,#1f8a35);box-shadow:inset -2px -2px 5px rgba(0,0,0,.3)}
 .stone-dot.red{background:radial-gradient(circle at 35% 35%,#e8806b,#a8281a);box-shadow:inset -2px -2px 5px rgba(0,0,0,.35)}
+.stone-dot.ccred{background:radial-gradient(circle at 35% 35%,#ff6b5b,#a8281a);box-shadow:inset -2px -2px 5px rgba(0,0,0,.35)}
+.stone-dot.ccyellow{background:radial-gradient(circle at 35% 35%,#ffe16b,#c99a10);box-shadow:inset -2px -2px 5px rgba(0,0,0,.3)}
 .pname{font-size:1rem;color:var(--text);font-weight:700;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .plabel{font-size:.8rem;color:var(--muted);margin-top:.3rem}
 .score-row{display:flex;justify-content:space-between;align-items:baseline;margin-top:.5rem}
@@ -2019,6 +2953,16 @@ select option{background:#221c14;color:var(--text)}
 .btn-sm.red{border-color:rgba(192,57,43,.35);color:#e74c3c}
 .btn-sm.red:hover{background:rgba(192,57,43,.08)}
 .rules-txt{font-size:.85rem;color:var(--muted);line-height:2;letter-spacing:.03em}
+.hand-tray{display:flex;flex-wrap:wrap;gap:.4rem;min-height:1.6em}
+.hand-piece-btn{padding:.35rem .6rem;background:rgba(212,169,74,.08);border:2px solid rgba(212,169,74,.3);border-radius:6px;color:var(--gold);font-family:'Noto Serif TC',serif;font-size:.9rem;font-weight:700;cursor:pointer;transition:all .15s}
+.hand-piece-btn:hover{background:rgba(212,169,74,.18)}
+.hand-piece-btn.active{border-color:#27ae60;color:#27ae60;background:rgba(39,174,96,.12)}
+.hand-piece-btn.opp{cursor:default;opacity:.7;border-color:rgba(212,169,74,.15)}
+#promo-prompt{display:none;position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:var(--panel);border:2px solid var(--gold);border-radius:14px;padding:1.2rem 1.5rem;text-align:center;box-shadow:0 10px 40px rgba(0,0,0,.6);z-index:5}
+#promo-prompt .promo-title{font-family:'Cinzel',serif;color:var(--gold);letter-spacing:.1em;margin-bottom:.8rem}
+#promo-prompt button{margin:.3rem;padding:.6rem 1.2rem;border-radius:8px;cursor:pointer;font-family:'Noto Serif TC',serif;font-weight:700}
+#promo-prompt .promo-yes{background:var(--gold);color:#1a1410;border:none}
+#promo-prompt .promo-no{background:transparent;border:2px solid rgba(212,169,74,.4);color:var(--gold)}
 /* Chat */
 .chat-wrap{display:flex;flex-direction:column;gap:.6rem}
 #chat-messages{max-height:180px;overflow-y:auto;font-size:.9rem;line-height:1.9;scrollbar-width:thin;scrollbar-color:rgba(212,169,74,.25) transparent;padding:.4rem}
@@ -2043,6 +2987,9 @@ canvas#board.xiangqi{box-shadow:0 0 0 8px #6b3a1a,0 0 0 12px rgba(212,169,74,.22
 canvas#board.banqi{box-shadow:0 0 0 8px #0d3a2e,0 0 0 12px rgba(212,169,74,.18),0 25px 70px rgba(0,0,0,.7)}
 canvas#board.connect4{box-shadow:0 0 0 8px #0a2a4d,0 0 0 12px rgba(80,150,230,.25),0 25px 70px rgba(0,0,0,.7)}
 canvas#board.chess{box-shadow:0 0 0 8px #3a2412,0 0 0 12px rgba(212,169,74,.25),0 25px 70px rgba(0,0,0,.7)}
+canvas#board.animalchess{box-shadow:0 0 0 8px #c47a2e,0 0 0 12px rgba(255,180,80,.25),0 25px 70px rgba(0,0,0,.7)}
+canvas#board.shogi{box-shadow:0 0 0 8px #5a3c1a,0 0 0 12px rgba(212,169,74,.25),0 25px 70px rgba(0,0,0,.7)}
+canvas#board.checkers{box-shadow:0 0 0 8px #5a1a3c,0 0 0 12px rgba(212,80,169,.22),0 25px 70px rgba(0,0,0,.7)}
 /* Flash */
 #flash-msg{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(180,30,30,.9);color:#fff;padding:1rem 1.5rem;border-radius:10px;font-size:1.1rem;letter-spacing:.1em;opacity:0;transition:opacity .4s;pointer-events:none;white-space:nowrap;font-weight:700}
 /* Win overlay */
@@ -2108,6 +3055,21 @@ footer{margin-top:1.5rem;font-size:.8rem;color:var(--muted);letter-spacing:.1em;
         <div class="pill-name">西洋棋</div>
         <div class="pill-sub">Chess</div>
       </div>
+      <div class="game-pill" onclick="selectGame('animalchess',this)">
+        <div class="pill-icon">🦁</div>
+        <div class="pill-name">動物將棋</div>
+        <div class="pill-sub">Animal Chess</div>
+      </div>
+      <div class="game-pill" onclick="selectGame('shogi',this)">
+        <div class="pill-icon">将</div>
+        <div class="pill-name">將棋</div>
+        <div class="pill-sub">Shogi</div>
+      </div>
+      <div class="game-pill" onclick="selectGame('checkers',this)">
+        <div class="pill-icon">🔺</div>
+        <div class="pill-name">跳棋</div>
+        <div class="pill-sub">Checkers（三人）</div>
+      </div>
     </div>
 
     <div id="xq-variant-pills" class="game-pills" style="display:none;grid-template-columns:1fr 1fr">
@@ -2141,7 +3103,7 @@ footer{margin-top:1.5rem;font-size:.8rem;color:var(--muted);letter-spacing:.1em;
 
   <div class="settings-grid">
     <div class="field" id="board-size-field">
-      <div class="field-label">棋盤大小</div>
+      <div class="field-label" id="board-size-label">棋盤大小</div>
       <select id="opt-size">
         <option value="13">13×13（小）</option>
         <option value="15" selected>15×15（標準）</option>
@@ -2160,7 +3122,7 @@ footer{margin-top:1.5rem;font-size:.8rem;color:var(--muted);letter-spacing:.1em;
       </select>
       <input type="number" id="opt-time-custom" placeholder="例：30" value="30" min="1" max="3600" style="display:none;margin-top:.5rem">
     </div>
-    <div class="field">
+    <div class="field" id="first-player-field">
       <div class="field-label">先後手</div>
       <select id="opt-first">
         <option value="black" id="opt-first-black">我執黑（先）</option>
@@ -2175,6 +3137,15 @@ footer{margin-top:1.5rem;font-size:.8rem;color:var(--muted);letter-spacing:.1em;
       <input type="checkbox" id="opt-forbidden">
       <label for="opt-forbidden">啟用黑方禁手
         <small>三三禁、四四禁（僅五子棋，黑方限定）</small>
+      </label>
+    </div>
+  </div>
+
+  <div id="checkers-only-opts" style="display:none">
+    <div class="checkbox-row">
+      <input type="checkbox" id="opt-king">
+      <label for="opt-king">啟用國王規則
+        <small>每方最尾排的一子為「王」，獲勝時王必須恰好走到對面最尾格</small>
       </label>
     </div>
   </div>
@@ -2224,12 +3195,15 @@ footer{margin-top:1.5rem;font-size:.8rem;color:var(--muted);letter-spacing:.1em;
           <option value="xiangqi:banqi">暗棋 Banqi</option>
           <option value="connect4">四子棋 Connect Four</option>
           <option value="chess">西洋棋 Chess</option>
+          <option value="animalchess">動物將棋 Animal Chess</option>
+          <option value="shogi">將棋 Shogi</option>
+          <option value="checkers" disabled>跳棋（三人，不可切換）Checkers</option>
         </select>
       </div>
 
       <div class="settings-grid" style="text-align:left">
         <div class="field" id="room-opt-size-field">
-          <div class="field-label">棋盤大小</div>
+          <div class="field-label" id="room-opt-size-label">棋盤大小</div>
           <select id="room-opt-size"></select>
         </div>
         <div class="field">
@@ -2244,7 +3218,7 @@ footer{margin-top:1.5rem;font-size:.8rem;color:var(--muted);letter-spacing:.1em;
           </select>
           <input type="number" id="room-opt-time-custom" placeholder="例：30" min="1" max="3600" style="display:none;margin-top:.5rem">
         </div>
-        <div class="field">
+        <div class="field" id="room-first-player-field">
           <div class="field-label">先後手</div>
           <select id="room-opt-first">
             <option value="black">黑方先</option>
@@ -2252,6 +3226,11 @@ footer{margin-top:1.5rem;font-size:.8rem;color:var(--muted);letter-spacing:.1em;
             <option value="random">隨機</option>
           </select>
         </div>
+      </div>
+
+      <div id="room-opt-king-row" class="checkbox-row" style="display:none;text-align:left">
+        <input type="checkbox" id="room-opt-king">
+        <label for="room-opt-king">啟用國王規則<small>每方最尾排的一子為「王」，獲勝時王必須恰好走到對面最尾格</small></label>
       </div>
 
       <div id="room-opt-forbidden-row" class="checkbox-row" style="text-align:left">
@@ -2295,6 +3274,12 @@ footer{margin-top:1.5rem;font-size:.8rem;color:var(--muted);letter-spacing:.1em;
       <div class="plabel" id="plabel-white">後手 · WHITE</div>
       <div class="score-row"><span class="score-lbl">勝</span><span class="score-num" id="score-white">0</span></div>
     </div>
+    <div class="player-card" id="card-p3" style="display:none">
+      <div class="stone-dot p3"></div>
+      <div class="pname" id="name-p3">第三家</div>
+      <div class="plabel">綠方 · GREEN</div>
+      <div class="score-row"><span class="score-lbl">勝</span><span class="score-num" id="score-p3">0</span></div>
+    </div>
     <div class="my-badge" id="my-color-badge">—</div>
     <div class="score-target" id="score-target">目標 3 勝</div>
   </div>
@@ -2311,6 +3296,11 @@ footer{margin-top:1.5rem;font-size:.8rem;color:var(--muted);letter-spacing:.1em;
         <button class="win-btn sec" onclick="leaveRoom()">離開房間</button>
       </div>
     </div>
+    <div id="promo-prompt">
+      <div class="promo-title">是否升級？</div>
+      <button class="promo-yes" onclick="confirmPromote(true)">升級</button>
+      <button class="promo-no" onclick="confirmPromote(false)">不升級</button>
+    </div>
   </div>
 
   <div class="side">
@@ -2325,6 +3315,20 @@ footer{margin-top:1.5rem;font-size:.8rem;color:var(--muted);letter-spacing:.1em;
       <div class="stat-cell"><div class="stat-num" id="stat-room">—</div><div class="stat-lbl">房間</div></div>
     </div>
     <div class="dv"></div>
+    <div id="hand-panel" style="display:none">
+      <div class="sec-label">我的手牌</div>
+      <div id="my-hand-tray" class="hand-tray"></div>
+      <div class="sec-label" style="margin-top:.6rem">對手手牌</div>
+      <div id="opp-hand-tray" class="hand-tray opp"></div>
+      <div class="dv"></div>
+    </div>
+    <div id="captured-panel" style="display:none">
+      <div class="sec-label">我方吃掉的棋子</div>
+      <div id="my-captured-tray" class="hand-tray"></div>
+      <div class="sec-label" style="margin-top:.6rem">對方吃掉的棋子</div>
+      <div id="opp-captured-tray" class="hand-tray opp"></div>
+      <div class="dv"></div>
+    </div>
     <div class="sec-label">聊天室</div>
     <div class="chat-wrap">
       <div id="chat-messages"><div class="chat-empty">說點什麼吧…</div></div>
